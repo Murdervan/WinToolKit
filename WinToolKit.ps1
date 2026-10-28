@@ -29,6 +29,114 @@ try {
     Clear-Host
 } catch {}
 
+# Best-effort console appearance tweaks:
+# - Slightly reduce the font in the classic Windows Console Host.
+# - Center the visible console window on the primary display.
+# Windows Terminal manages its own font and window placement, so these
+# legacy console APIs may be ignored when WinToolKit runs inside Terminal.
+try {
+    if (-not ('WinToolKit.NativeConsole' -as [type])) {
+        $nativeConsoleCode = @'
+using System;
+using System.Runtime.InteropServices;
+namespace WinToolKit {
+    public static class NativeConsole {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COORD {
+            public short X;
+            public short Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct CONSOLE_FONT_INFOEX {
+            public uint cbSize;
+            public uint nFont;
+            public COORD dwFontSize;
+            public int FontFamily;
+            public int FontWeight;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string FaceName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetCurrentConsoleFontEx(IntPtr hConsoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetCurrentConsoleFontEx(IntPtr hConsoleOutput, bool bMaximumWindow, ref CONSOLE_FONT_INFOEX lpConsoleCurrentFontEx);
+
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
+    }
+}
+'@
+        Add-Type -TypeDefinition $nativeConsoleCode -ErrorAction Stop
+    }
+
+    # Shrink the font slightly where the classic console exposes font controls.
+    $stdoutHandle = [WinToolKit.NativeConsole]::GetStdHandle(-11)
+    if ($stdoutHandle -ne [IntPtr]::Zero) {
+        $font = New-Object 'WinToolKit.NativeConsole+CONSOLE_FONT_INFOEX'
+        $font.cbSize = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type]'WinToolKit.NativeConsole+CONSOLE_FONT_INFOEX')
+        $font.FaceName = ''
+        if ([WinToolKit.NativeConsole]::GetCurrentConsoleFontEx($stdoutHandle, $false, [ref]$font)) {
+            if ($font.dwFontSize.Y -gt 14) {
+                $fontSize = $font.dwFontSize
+                $fontSize.Y = [int16]14
+                $font.dwFontSize = $fontSize
+                [void][WinToolKit.NativeConsole]::SetCurrentConsoleFontEx($stdoutHandle, $false, [ref]$font)
+            }
+        }
+    }
+
+    # Center only a visible classic console window; do nothing in hosts such as Windows Terminal.
+    $consoleWindow = [WinToolKit.NativeConsole]::GetConsoleWindow()
+    if ($consoleWindow -ne [IntPtr]::Zero -and [WinToolKit.NativeConsole]::IsWindowVisible($consoleWindow)) {
+        $rect = New-Object 'WinToolKit.NativeConsole+RECT'
+        if ([WinToolKit.NativeConsole]::GetWindowRect($consoleWindow, [ref]$rect)) {
+            $windowWidth = $rect.Right - $rect.Left
+            $windowHeight = $rect.Bottom - $rect.Top
+            $screenWidth = [WinToolKit.NativeConsole]::GetSystemMetrics(0)
+            $screenHeight = [WinToolKit.NativeConsole]::GetSystemMetrics(1)
+            if ($windowWidth -gt 0 -and $windowHeight -gt 0 -and $screenWidth -ge $windowWidth -and $screenHeight -ge $windowHeight) {
+                $left = [int][Math]::Max(0, [Math]::Floor(($screenWidth - $windowWidth) / 2.0))
+                $top = [int][Math]::Max(0, [Math]::Floor(($screenHeight - $windowHeight) / 2.0))
+                $flags = [uint32](0x0001 -bor 0x0004 -bor 0x0010) # NOSIZE | NOZORDER | NOACTIVATE
+                [void][WinToolKit.NativeConsole]::SetWindowPos($consoleWindow, [IntPtr]::Zero, $left, $top, 0, 0, $flags)
+            }
+        }
+    }
+} catch {
+    # Appearance changes must never prevent WinToolKit from starting.
+}
+
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
