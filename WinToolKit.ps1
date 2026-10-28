@@ -124,7 +124,8 @@ $script:Categories = [ordered]@{
         @{N='Music'; P='ZuneMusic'},
         @{N='Camera'; P='WindowsCamera'},
         @{N='Voice Recorder'; P='SoundRecorder'},
-        @{N='Clipchamp'; P='Clipchamp'}
+        @{N='Clipchamp'; P='Clipchamp'},
+        @{N='Films & TV'; P='ZuneVideo'}
     )
     'XBOX' = @(
         @{N='Xbox App'; P='XboxApp'},
@@ -145,6 +146,10 @@ $script:Categories = [ordered]@{
         @{N='Sticky Notes'; P='StickyNotes'},
         @{N='OneNote'; P='OneNote'},
         @{N='Office Hub'; P='MicrosoftOfficeHub'},
+        @{N='Microsoft 365 / Office 365 (Store & Click-to-Run)'; P='OfficeClickToRun'},
+        @{N='Maps'; P='WindowsMaps'},
+        @{N='Get Help'; P='GetHelp'},
+        @{N='People / Contacts'; P='People'},
         @{N='Dev Home'; P='DevHome'}
     )
     'BLOAT' = @(
@@ -167,17 +172,152 @@ $script:Categories = [ordered]@{
         @{N='Print 3D'; P='Print3D'},
         @{N='Paint 3D'; P='MSPaint'}
     )
-    'EXTENSIONS' = @(
-        @{N='HEIF Image Extensions'; P='HEIFImageExtension'},
-        @{N='Web Media Extensions'; P='WebMediaExtensions'},
-        @{N='Raw Image Extension'; P='RawImageExtension'}
-    )
+    # EXTENSIONS category intentionally empty: Web Media Extensions is excluded from removal.
     'OTHER' = @(
         @{N='Phone Link'; P='YourPhone'},
+        @{N='Mobile Devices (Cross Device Experience Host)'; P='CrossDevice'},
         @{N='Family Safety'; P='MicrosoftFamily'},
+        @{N='Windows Backup'; P='WindowsBackup'},
         @{N='Store Ads'; P='StorePurchaseApp'},
         @{N='Power Automate'; P='Microsoft.PowerAutomateDesktop'}
     )
+}
+
+
+function Invoke-Microsoft365Removal {
+    # Microsoft Store editions are Appx packages; traditional Microsoft 365/Office
+    # editions use Click-to-Run and expose an uninstall command in the registry.
+    $removed = $false
+    $failed = $false
+
+    try {
+        $storePackages = @(Get-AppxPackage -AllUsers -Name 'Microsoft.Office.Desktop' -ErrorAction Stop)
+        foreach ($app in $storePackages) {
+            try {
+                Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
+                $removed = $true
+                Write-Log "Removed Microsoft 365 Store package: $($app.PackageFullName)"
+            } catch {
+                $failed = $true
+                Write-Log "ERROR removing Microsoft 365 Store package $($app.PackageFullName): $($_.Exception.Message)"
+                Write-Host "Could not remove Store package $($app.PackageFullName): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        $failed = $true
+        Write-Log "ERROR checking Microsoft 365 Store package: $($_.Exception.Message)"
+    }
+
+    try {
+        $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object {
+            $_.DisplayName -like '*Microsoft.Office.Desktop*' -or $_.PackageName -like '*Microsoft.Office.Desktop*'
+        })
+        foreach ($app in $provisioned) {
+            try {
+                Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
+                $removed = $true
+                Write-Log "Removed provisioned Microsoft 365 Store package: $($app.PackageName)"
+            } catch {
+                $failed = $true
+                Write-Log "ERROR removing provisioned Microsoft 365 package $($app.PackageName): $($_.Exception.Message)"
+                Write-Host "Could not remove provisioned package $($app.PackageName): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    } catch {
+        $failed = $true
+        Write-Log "ERROR checking provisioned Microsoft 365 package: $($_.Exception.Message)"
+    }
+
+    $registryPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $officeEntries = @()
+    foreach ($path in $registryPaths) {
+        try {
+            $officeEntries += @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue | Where-Object {
+                $_.DisplayName -match '(?i)(Microsoft 365|Office 365|Microsoft Office)' -and
+                $_.UninstallString -match '(?i)OfficeClickToRun\.exe' -and
+                $_.UninstallString -match '(?i)productstoremove='
+            })
+        } catch {
+            Write-Log "Could not read Office uninstall entries from $path : $($_.Exception.Message)"
+        }
+    }
+
+    $uniqueCommands = @($officeEntries | Where-Object { $_.UninstallString } | Group-Object -Property UninstallString | ForEach-Object { $_.Group[0] })
+    foreach ($entry in $uniqueCommands) {
+        $uninstall = [string]$entry.UninstallString
+        $match = [regex]::Match($uninstall, '(?i)^\s*"?(.+?OfficeClickToRun\.exe)"?\s*(.*)$')
+        if (-not $match.Success) {
+            $failed = $true
+            Write-Log "Could not parse Office Click-to-Run uninstall command for $($entry.DisplayName)"
+            continue
+        }
+        $exe = $match.Groups[1].Value.Trim([char[]]@('"', ' '))
+        $arguments = $match.Groups[2].Value
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            $failed = $true
+            Write-Log "Office Click-to-Run executable was not found: $exe"
+            Write-Host "Office uninstall executable was not found: $exe" -ForegroundColor Yellow
+            continue
+        }
+        try {
+            Write-Host "Starting the registered Office removal for: $($entry.DisplayName)" -ForegroundColor Yellow
+            Write-Log "Starting Office Click-to-Run removal: $($entry.DisplayName)"
+            $proc = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru -ErrorAction Stop
+            Write-Host "Office removal process ended with exit code $($proc.ExitCode)." -ForegroundColor Cyan
+            Write-Log "Office removal process ended with exit code $($proc.ExitCode): $($entry.DisplayName)"
+            $removed = $true
+        } catch {
+            $failed = $true
+            Write-Log "ERROR running Office Click-to-Run removal for $($entry.DisplayName): $($_.Exception.Message)"
+            Write-Host "Could not start Office removal: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    if ($removed) {
+        Write-Host 'Microsoft 365 / Office removal command(s) have been run. Check Windows and the log for the final result.' -ForegroundColor Green
+        Write-Log 'Microsoft 365 / Office removal sequence completed or attempted.'
+    } elseif ($failed) {
+        Write-Host 'The Office check/removal encountered an issue. Check the log; this can also mean Office uses another installation type.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'No Microsoft 365 / Office Store or Click-to-Run installation was found.' -ForegroundColor DarkYellow
+        Write-Log 'Microsoft 365 / Office not found.'
+    }
+}
+
+function Test-ProtectedRemovalTarget {
+    param(
+        [string]$Name,
+        [string]$Package,
+        [string[]]$DetectedIdentifiers = @()
+    )
+
+    # These apps must not be offered for removal or removed as a side effect of a broad match.
+    $protectedDisplayNames = @(
+        'Photos', 'Photos / Billeder', 'Billeder',
+        'HEIF Image Extensions', 'Raw Image Extension',
+        'Snipping Tool', 'Notepad', 'Notepad / Notesblok', 'Notesblok'
+    )
+    if ($Name -and ($protectedDisplayNames -contains $Name.Trim())) { return $true }
+
+    # Appx package identifiers appear as either the short package name, family name or full name.
+    $protectedPatterns = @(
+        '(?i)^Microsoft\.Windows\.Photos(?:_|$)',
+        '(?i)^(?:Microsoft\.)?HEIFImageExtension(?:_|$)',
+        '(?i)^(?:Microsoft\.)?RawImageExtension(?:_|$)',
+        '(?i)^(?:Microsoft\.)?ScreenSketch(?:_|$)',
+        '(?i)^(?:Microsoft\.)?WindowsNotepad(?:_|$)'
+    )
+    foreach ($identifier in (@($Package) + @($DetectedIdentifiers))) {
+        if ([string]::IsNullOrWhiteSpace([string]$identifier)) { continue }
+        foreach ($pattern in $protectedPatterns) {
+            if ([string]$identifier -match $pattern) { return $true }
+        }
+    }
+    return $false
 }
 
 function Remove-App {
@@ -186,6 +326,12 @@ function Remove-App {
         [string]$Package,
         [switch]$SkipConfirmation
     )
+
+    if (Test-ProtectedRemovalTarget -Name $Name -Package $Package) {
+        Write-Host "Blocked: $Name is protected and is not removable through WinToolKit." -ForegroundColor Cyan
+        Write-Log "BLOCKED protected removal target: $Name ($Package)"
+        return
+    }
 
     if (-not $SkipConfirmation) {
         Write-Host ''
@@ -197,6 +343,11 @@ function Remove-App {
             Write-Host 'Removal cancelled.' -ForegroundColor Cyan
             return
         }
+    }
+
+    if ($Package -eq 'OfficeClickToRun') {
+        Invoke-Microsoft365Removal
+        return
     }
 
     $removed = $false
@@ -221,6 +372,11 @@ function Remove-App {
         $_.PackageFamilyName -like "*$Package*" -or
         $_.PackageFullName -like "*$Package*"
     }) {
+        if (Test-ProtectedRemovalTarget -Name $app.Name -Package $Package -DetectedIdentifiers @($app.Name, $app.PackageFamilyName, $app.PackageFullName)) {
+            Write-Log "SKIPPED protected installed package: $($app.PackageFullName)"
+            Write-Host "Protected package skipped: $($app.Name)" -ForegroundColor Cyan
+            continue
+        }
         try {
             Remove-AppxPackage -Package $app.PackageFullName -AllUsers -ErrorAction Stop
             $removed = $true
@@ -235,6 +391,11 @@ function Remove-App {
     foreach ($app in $provisioned | Where-Object {
         $_.DisplayName -like "*$Package*" -or $_.PackageName -like "*$Package*"
     }) {
+        if (Test-ProtectedRemovalTarget -Name $app.DisplayName -Package $Package -DetectedIdentifiers @($app.DisplayName, $app.PackageName)) {
+            Write-Log "SKIPPED protected provisioned package: $($app.PackageName)"
+            Write-Host "Protected provisioned package skipped: $($app.DisplayName)" -ForegroundColor Cyan
+            continue
+        }
         try {
             Remove-AppxProvisionedPackage -Online -PackageName $app.PackageName -ErrorAction Stop | Out-Null
             $removed = $true
@@ -446,39 +607,339 @@ function Show-RemovalMenu {
     }
 }
 
-function Show-AppScan {
-    Clear-Host
-    Write-Host 'APP SCAN' -ForegroundColor Green
-    Write-Host 'Reading installed app packages. This may take a moment.' -ForegroundColor Gray
-    try {
-        $installed = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
-    } catch {
-        Write-Host "Could not read packages: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Log "ERROR scanning installed packages: $($_.Exception.Message)"
-        Pause-Return
-        return
+function Get-AppScanPackagePatterns {
+    # Exact package-name aliases for targets whose package identity does not
+    # contain the short label as a separate token (e.g. WindowsCalculator).
+    return @{
+        'Calculator' = @('(?i)^Microsoft\.WindowsCalculator(?:_|$)')
+        'Paint' = @('(?i)^Microsoft\.Paint(?:_|$)')
+        'Clock' = @('(?i)^Microsoft\.WindowsAlarms(?:_|$)', '(?i)^Microsoft\.WindowsClock(?:_|$)')
+        'Windows Store' = @('(?i)^Microsoft\.WindowsStore(?:_|$)')
+        'Store Core' = @('(?i)^Microsoft\.StorePurchaseApp(?:_|$)')
+        'OneDrive' = @('(?i)^Microsoft\.OneDrive(?:_|$)', '(?i)^Microsoft\.OneDriveSync(?:_|$)')
+        'Quick Assist' = @('(?i)^MicrosoftCorporationII\.QuickAssist(?:_|$)', '(?i)^Microsoft\.QuickAssist(?:_|$)')
+        'Media Player' = @('(?i)^Microsoft\.Media\.Player(?:_|$)', '(?i)^Microsoft\.ZuneMusic(?:_|$)')
+        'Music' = @('(?i)^Microsoft\.ZuneMusic(?:_|$)')
+        'Camera' = @('(?i)^Microsoft\.WindowsCamera(?:_|$)')
+        'Voice Recorder' = @('(?i)^Microsoft\.WindowsSoundRecorder(?:_|$)', '(?i)^Microsoft\.SoundRecorder(?:_|$)')
+        'Clipchamp' = @('(?i)^Clipchamp\.Clipchamp(?:_|$)', '(?i)^Microsoft\.Clipchamp(?:_|$)')
+        'Films & TV' = @('(?i)^Microsoft\.ZuneVideo(?:_|$)')
+        'Xbox App' = @('(?i)^Microsoft\.GamingApp(?:_|$)', '(?i)^Microsoft\.XboxApp(?:_|$)')
+        'Xbox Game Bar' = @('(?i)^Microsoft\.XboxGamingOverlay(?:_|$)')
+        'Xbox Identity Provider' = @('(?i)^Microsoft\.XboxIdentityProvider(?:_|$)')
+        'Xbox Speech To Text' = @('(?i)^Microsoft\.XboxSpeechToTextOverlay(?:_|$)')
+        'Xbox TCUI' = @('(?i)^Microsoft\.Xbox\.TCUI(?:_|$)')
+        'Teams Personal' = @('(?i)^(?:MSTeams|MicrosoftTeams)(?:_|$)')
+        'Skype' = @('(?i)^Microsoft\.SkypeApp(?:_|$)', '(?i)^Microsoft\.Skype(?:_|$)')
+        'Mail & Calendar' = @('(?i)^microsoft\.windowscommunicationsapps(?:_|$)')
+        'Outlook New' = @('(?i)^Microsoft\.OutlookForWindows(?:_|$)', '(?i)^Microsoft\.Outlook(?:_|$)')
+        'LinkedIn' = @('(?i)^LinkedInforWindows(?:_|$)', '(?i)^Microsoft\.LinkedIn(?:_|$)')
+        'To Do' = @('(?i)^Microsoft\.Todos(?:_|$)')
+        'Sticky Notes' = @('(?i)^Microsoft\.MicrosoftStickyNotes(?:_|$)')
+        'OneNote' = @('(?i)^Microsoft\.Office\.OneNote(?:_|$)', '(?i)^Microsoft\.OneNote(?:_|$)')
+        'Office Hub' = @('(?i)^Microsoft\.MicrosoftOfficeHub(?:_|$)')
+        'Microsoft 365 / Office 365 (Store & Click-to-Run)' = @('(?i)^Microsoft\.Office\.Desktop(?:_|$)')
+        'Maps' = @('(?i)^Microsoft\.WindowsMaps(?:_|$)')
+        'Get Help' = @('(?i)^Microsoft\.GetHelp(?:_|$)')
+        'People / Contacts' = @('(?i)^Microsoft\.People(?:_|$)')
+        'Dev Home' = @('(?i)^Microsoft\.DevHome(?:_|$)')
+        'Copilot' = @('(?i)^Microsoft\.Copilot(?:_|$)', '(?i)^MicrosoftWindows\.Client\.Copilot(?:_|$)')
+        'Cortana' = @('(?i)^Microsoft\.549981C3F5F10(?:_|$)', '(?i)^Microsoft\.Windows\.Cortana(?:_|$)')
+        'Feedback Hub' = @('(?i)^Microsoft\.WindowsFeedbackHub(?:_|$)')
+        'Get Started' = @('(?i)^Microsoft\.Getstarted(?:_|$)')
+        'News' = @('(?i)^Microsoft\.BingNews(?:_|$)')
+        'Weather' = @('(?i)^Microsoft\.BingWeather(?:_|$)')
+        'Solitaire' = @('(?i)^Microsoft\.MicrosoftSolitaireCollection(?:_|$)')
+        'Web Experience Pack' = @('(?i)^MicrosoftWindows\.Client\.WebExperience(?:_|$)')
+        'Bing Search' = @('(?i)^Microsoft\.BingSearch(?:_|$)')
+        '3D Viewer' = @('(?i)^Microsoft\.Microsoft3DViewer(?:_|$)')
+        'Mixed Reality Portal' = @('(?i)^Microsoft\.MixedReality\.Portal(?:_|$)')
+        'Print 3D' = @('(?i)^Microsoft\.Print3D(?:_|$)')
+        'Paint 3D' = @('(?i)^Microsoft\.MSPaint(?:_|$)')
+        'Phone Link' = @('(?i)^Microsoft\.YourPhone(?:_|$)')
+        'Mobile Devices (Cross Device Experience Host)' = @('(?i)^MicrosoftWindows\.CrossDevice(?:_|$)', '(?i)^Microsoft\.Windows\.CrossDevice(?:_|$)')
+        'Family Safety' = @('(?i)^MicrosoftCorporationII\.MicrosoftFamily(?:_|$)', '(?i)^Microsoft\.MicrosoftFamily(?:_|$)')
+        'Windows Backup' = @('(?i)^Microsoft\.WindowsBackup(?:_|$)')
+        'Store Ads' = @('(?i)^Microsoft\.StorePurchaseApp(?:_|$)')
+        'Power Automate' = @('(?i)^Microsoft\.PowerAutomateDesktop(?:_|$)')
     }
-    $present = 0
-    $missing = 0
-    foreach ($cat in $script:Categories.Keys) {
-        Write-Host "`n--- $cat ---" -ForegroundColor Cyan
-        foreach ($app in $script:Categories[$cat]) {
-            $found = @($installed | Where-Object {
-                $_.Name -like "*$($app.P)*" -or
-                $_.PackageFamilyName -like "*$($app.P)*" -or
-                $_.PackageFullName -like "*$($app.P)*"
+}
+
+function Test-AppScanIdentifier {
+    param(
+        [Parameter(Mandatory=$true)]$App,
+        [AllowNull()][string]$Identifier,
+        [hashtable]$PackagePatterns
+    )
+    if ([string]::IsNullOrWhiteSpace($Identifier)) { return $false }
+
+    if ($PackagePatterns.ContainsKey([string]$App.N)) {
+        foreach ($pattern in $PackagePatterns[[string]$App.N]) {
+            if ($Identifier -match $pattern) { return $true }
+        }
+    }
+
+    # Avoid a generic "Store" substring hit: it would make Windows Store,
+    # Store Core and Store Ads all appear installed for the same unrelated match.
+    if ([string]$App.P -eq 'Store' -or [string]$App.P -eq 'OfficeClickToRun') { return $false }
+
+    $token = [regex]::Escape([string]$App.P)
+    if ($Identifier -match ("(?i)(?:^|[._]){0}(?:[._]|$)" -f $token)) { return $true }
+    return $false
+}
+
+function Get-AppScanRegistryEntries {
+    $entries = @()
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($path in $paths) {
+        try {
+            $entries += @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.DisplayName)
             })
-            if ($found.Count -gt 0) {
-                Write-Host "  [FOUND] $($app.N)" -ForegroundColor Yellow
-                $present++
-            } else {
-                Write-Host "  [NOT FOUND] $($app.N)" -ForegroundColor DarkGray
-                $missing++
+        } catch {
+            Write-Log "Could not read installed-program registry entries at $path : $($_.Exception.Message)"
+        }
+    }
+    return $entries
+}
+
+function Get-AppScanOfficeState {
+    param([object[]]$RegistryEntries)
+
+    $details = @()
+    $inventoryPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Inventory\Office\16.0',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\ClickToRun\Inventory\Office\16.0',
+        'HKCU:\SOFTWARE\Microsoft\Office\ClickToRun\Inventory\Office\16.0'
+    )
+    foreach ($path in $inventoryPaths) {
+        try {
+            if (Test-Path -LiteralPath $path) {
+                $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+                $ids = [string]$item.OfficeProductReleaseIds
+                $version = [string]$item.OfficePackageVersion
+                # Microsoft's Click-to-Run inventory values are the primary detection source.
+                if (-not [string]::IsNullOrWhiteSpace($ids) -and -not [string]::IsNullOrWhiteSpace($version)) {
+                    $details += "Click-to-Run inventory: $ids, version $version"
+                } elseif (-not [string]::IsNullOrWhiteSpace($ids)) {
+                    $details += "Click-to-Run inventory: $ids"
+                }
+            }
+        } catch {
+            Write-Log "Could not read Office inventory at $path : $($_.Exception.Message)"
+        }
+    }
+
+    # Use Configuration only as a fallback; do not trust VersionToReport by itself.
+    foreach ($path in @(
+        'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\ClickToRun\Configuration',
+        'HKCU:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+    )) {
+        if ($details.Count -gt 0) { break }
+        try {
+            if (Test-Path -LiteralPath $path) {
+                $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+                $ids = [string]$item.ProductReleaseIds
+                $installPath = [string]$item.InstallationPath
+                if (-not [string]::IsNullOrWhiteSpace($ids) -and
+                    ((-not [string]::IsNullOrWhiteSpace($installPath) -and (Test-Path -LiteralPath $installPath)) -or
+                     -not [string]::IsNullOrWhiteSpace([string]$item.CDNBaseUrl))) {
+                    $details += "Click-to-Run configuration: $ids"
+                }
+            }
+        } catch {
+            Write-Log "Could not read Office configuration at $path : $($_.Exception.Message)"
+        }
+    }
+
+    if ($details.Count -eq 0) {
+        $officeNamePattern = '(?i)^(Microsoft 365(?: Apps?.*)?|Office 365(?:.*)?|Microsoft Office (?:Professional|Standard|Home|Personal|Home and Student|Home and Business|LTSC|Enterprise|365|Mondo|Professional Plus).*)'
+        foreach ($entry in $RegistryEntries) {
+            if ([string]$entry.DisplayName -match $officeNamePattern) {
+                # Do not treat the lightweight Office Hub/Office app or language tools alone as the suite.
+                if ([string]$entry.DisplayName -match '(?i)(Office Hub|Office Desktop Apps|Proofing Tools|Language Pack|Shared MUI)') { continue }
+                $details += "Installed-program registry: $($entry.DisplayName)"
             }
         }
     }
-    Write-Host "`nFound: $present    Not found: $missing" -ForegroundColor Green
-    Write-Log "App scan completed. Found=$present; NotFound=$missing"
+
+    if ($details.Count -eq 0) {
+        $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
+        $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+        $officeExePaths = @()
+        foreach ($root in @($programFiles, $programFilesX86)) {
+            if ([string]::IsNullOrWhiteSpace($root)) { continue }
+            foreach ($relative in @(
+                'Microsoft Office\root\Office16\WINWORD.EXE',
+                'Microsoft Office\Office16\WINWORD.EXE',
+                'Microsoft Office\root\Office16\EXCEL.EXE',
+                'Microsoft Office\Office16\EXCEL.EXE',
+                'Microsoft Office\root\Office16\POWERPNT.EXE',
+                'Microsoft Office\Office16\POWERPNT.EXE'
+            )) { $officeExePaths += (Join-Path $root $relative) }
+        }
+        $foundExe = @($officeExePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
+        if ($foundExe.Count -gt 0) { $details += "Office executable: $($foundExe[0])" }
+    }
+
+    return [pscustomobject]@{
+        Installed = ($details.Count -gt 0)
+        Details = @($details | Select-Object -Unique)
+    }
+}
+
+function Test-AppScanRegistryEntry {
+    param([Parameter(Mandatory=$true)]$App, [object[]]$RegistryEntries)
+
+    $patterns = @{
+        'OneDrive' = '(?i)^Microsoft OneDrive(?:\s|$|\()'
+        'Quick Assist' = '(?i)^Microsoft Quick Assist(?:\s|$|\()'
+        'Skype' = '(?i)^Skype(?:\s|$|\()'
+        'OneNote' = '(?i)^(?:Microsoft )?OneNote(?:\s|$|\()'
+        'Edge WebView2' = '(?i)^Microsoft Edge WebView2 Runtime(?:\s|$|\()'
+        'Power Automate' = '(?i)^(?:Microsoft )?Power Automate(?: for desktop| Desktop)?(?:\s|$|\()'
+        'Outlook New' = '(?i)^(?:Microsoft )?Outlook \(new\)(?:\s|$|\()'
+    }
+    if (-not $patterns.ContainsKey([string]$App.N)) { return $false }
+    $pattern = $patterns[[string]$App.N]
+    foreach ($entry in $RegistryEntries) {
+        if ([string]$entry.DisplayName -match $pattern) { return $true }
+    }
+    return $false
+}
+
+function Show-AppScan {
+    Clear-Host
+    Write-Host 'APP SCAN' -ForegroundColor Green
+    Write-Host 'Checking installed Store apps, provisioned apps, desktop apps and Microsoft Office.' -ForegroundColor Gray
+    Write-Host 'A provisioned app is prepared for new user profiles; it is not necessarily installed for the current user.' -ForegroundColor DarkGray
+
+    $installed = @()
+    $appxCheckComplete = $false
+    $appxScope = 'all users'
+    try {
+        $installed = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+        $appxCheckComplete = $true
+    } catch {
+        Write-Log "APP SCAN: Get-AppxPackage -AllUsers failed: $($_.Exception.Message)"
+        try {
+            $installed = @(Get-AppxPackage -ErrorAction Stop)
+            $appxCheckComplete = $true
+            $appxScope = 'current user only (run as administrator for all users)'
+        } catch {
+            Write-Log "APP SCAN: current-user package check failed: $($_.Exception.Message)"
+        }
+    }
+
+    $provisioned = @()
+    $provisionedCheckComplete = $false
+    try {
+        $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)
+        $provisionedCheckComplete = $true
+    } catch {
+        Write-Log "APP SCAN: provisioned package check failed: $($_.Exception.Message)"
+    }
+
+    $registryEntries = @(Get-AppScanRegistryEntries)
+    $officeState = Get-AppScanOfficeState -RegistryEntries $registryEntries
+    $packagePatterns = Get-AppScanPackagePatterns
+
+    if ($appxScope -ne 'all users') {
+        Write-Host "NOTE: AppX results cover $appxScope." -ForegroundColor Yellow
+    }
+    if (-not $provisionedCheckComplete) {
+        Write-Host 'NOTE: Windows could not read provisioned package state; some Store results may be incomplete.' -ForegroundColor Yellow
+    }
+
+    $present = 0
+    $missing = 0
+    $provisionedOnlyCount = 0
+    $unknown = 0
+    foreach ($cat in $script:Categories.Keys) {
+        Write-Host "`n--- $cat ---" -ForegroundColor Cyan
+        foreach ($app in $script:Categories[$cat]) {
+            $appxMatches = @()
+            foreach ($pkg in $installed) {
+                $identifiers = @($pkg.Name, $pkg.PackageFamilyName, $pkg.PackageFullName)
+                $matched = $false
+                foreach ($identifier in $identifiers) {
+                    if (Test-AppScanIdentifier -App $app -Identifier ([string]$identifier) -PackagePatterns $packagePatterns) {
+                        $matched = $true; break
+                    }
+                }
+                if ($matched) { $appxMatches += $pkg }
+            }
+
+            $provisionedMatches = @()
+            foreach ($pkg in $provisioned) {
+                $identifiers = @($pkg.DisplayName, $pkg.PackageName)
+                $matched = $false
+                foreach ($identifier in $identifiers) {
+                    if (Test-AppScanIdentifier -App $app -Identifier ([string]$identifier) -PackagePatterns $packagePatterns) {
+                        $matched = $true; break
+                    }
+                }
+                if ($matched) { $provisionedMatches += $pkg }
+            }
+
+            $isInstalled = ($appxMatches.Count -gt 0)
+            $sources = @()
+            if ($isInstalled) { $sources += 'Store/AppX' }
+            if ($provisionedMatches.Count -gt 0) { $sources += 'provisioned for new profiles' }
+
+            if ($app.P -eq 'OfficeClickToRun') {
+                if ($officeState.Installed) {
+                    $isInstalled = $true
+                    $sources += 'Office Click-to-Run/MSI'
+                    foreach ($detail in $officeState.Details) { Write-Host "      Detected: $detail" -ForegroundColor DarkGray }
+                }
+            } elseif (-not $isInstalled -and (Test-AppScanRegistryEntry -App $app -RegistryEntries $registryEntries)) {
+                $isInstalled = $true
+                $sources += 'desktop-app registry'
+            } elseif (-not $isInstalled -and $app.N -eq 'OneNote') {
+                # OneNote can be installed as a desktop app inside Microsoft 365 instead of a Store package.
+                $officeRoots = @([Environment]::GetEnvironmentVariable('ProgramFiles'), [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'))
+                foreach ($root in $officeRoots) {
+                    if ([string]::IsNullOrWhiteSpace($root)) { continue }
+                    foreach ($relative in @('Microsoft Office\root\Office16\ONENOTE.EXE', 'Microsoft Office\Office16\ONENOTE.EXE')) {
+                        if (Test-Path -LiteralPath (Join-Path $root $relative)) {
+                            $isInstalled = $true
+                            $sources += 'OneNote desktop executable'
+                            break
+                        }
+                    }
+                    if ($isInstalled) { break }
+                }
+            }
+
+            if ($isInstalled) {
+                $present++
+                $uniqueSources = @($sources | Select-Object -Unique)
+                Write-Host "  [INSTALLED] $($app.N) ($($uniqueSources -join '; '))" -ForegroundColor Green
+                Write-Log "APP SCAN: INSTALLED: $($app.N) - $($uniqueSources -join '; ')"
+            } elseif ($provisionedMatches.Count -gt 0) {
+                $provisionedOnlyCount++
+                Write-Host "  [PROVISIONED ONLY] $($app.N) (new user profiles)" -ForegroundColor Yellow
+                Write-Log "APP SCAN: PROVISIONED ONLY: $($app.N)"
+            } elseif (-not $appxCheckComplete -or -not $provisionedCheckComplete -or $appxScope -ne 'all users') {
+                $unknown++
+                Write-Host "  [UNKNOWN] $($app.N) (package checks failed)" -ForegroundColor Yellow
+                Write-Log "APP SCAN: UNKNOWN: $($app.N)"
+            } else {
+                $missing++
+                Write-Host "  [NOT FOUND] $($app.N)" -ForegroundColor DarkGray
+                Write-Log "APP SCAN: NOT FOUND: $($app.N)"
+            }
+        }
+    }
+    Write-Host "`nInstalled: $present    Provisioned only: $provisionedOnlyCount    Not found: $missing    Unknown: $unknown" -ForegroundColor Green
+    Write-Log "App scan completed. Installed=$present; ProvisionedOnly=$provisionedOnlyCount; NotFound=$missing; Unknown=$unknown; AppxScope=$appxScope"
     Pause-Return
 }
 
@@ -524,10 +985,9 @@ function Get-CustomInstallerList {
         New-Item -ItemType Directory -Path $script:AppsPath -Force | Out-Null
     }
     if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { $Folder = $script:AppsPath }
-    $extensions = @('.exe', '.msi', '.msix', '.appx', '.msixbundle', '.appxbundle')
+    # Show all files so BAT, CMD, PowerShell scripts, and other file types can be opened too.
     $dirs = @(Get-ChildItem -LiteralPath $Folder -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
-    $files = @(Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue |
-        Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() } | Sort-Object Name)
+    $files = @(Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue | Sort-Object Name)
     return @{ Folders = $dirs; Files = $files; Current = $Folder }
 }
 
@@ -537,9 +997,9 @@ function Install-CustomApp {
         $listing = Get-CustomInstallerList -Folder $currentFolder
         Clear-Host
         Write-Host 'INSTALL CUSTOM APPS' -ForegroundColor Cyan
-        Write-Host 'Browse folders, open them in Explorer, or choose an installer.' -ForegroundColor Gray
+        Write-Host 'Browse folders, open them in Explorer, or choose a file to run/open.' -ForegroundColor Gray
         Write-Host "Current folder: $currentFolder" -ForegroundColor DarkGray
-        Write-Host 'Supported installers: EXE, MSI, MSIX, APPX, MSIXBUNDLE, APPXBUNDLE' -ForegroundColor DarkGray
+        Write-Host 'Installers: EXE/MSI/MSIX/APPX | Scripts: BAT/CMD/PS1/VBS/JS | Other files open with their default Windows app' -ForegroundColor DarkGray
         Write-Host ''
         $indexMap = @{}
         $n = 1
@@ -553,7 +1013,7 @@ function Install-CustomApp {
             $indexMap[$n] = @{ Type='File'; Item=$file }
             $n++
         }
-        if ($n -eq 1) { Write-Host 'No folders or supported installers in this location.' -ForegroundColor DarkGray }
+        if ($n -eq 1) { Write-Host 'No folders or files in this location.' -ForegroundColor DarkGray }
         Write-Host ''
         Write-Host '[O] Open current folder in Explorer   [U] Up   [R] Refresh   [B] Back' -ForegroundColor Green
         $sel = (Read-Host 'Choose a number or action').Trim()
@@ -601,13 +1061,50 @@ function Install-CustomApp {
             try {
                 Write-Log "Started custom installer: $($installer.FullName)"
                 switch ($extension) {
-                    '.exe' { $proc = Start-Process -FilePath $installer.FullName -Wait -PassThru -ErrorAction Stop }
-                    '.msi' { $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList @('/i', ('"{0}"' -f $installer.FullName)) -Wait -PassThru -ErrorAction Stop }
-                    { $_ -in '.msix', '.appx', '.msixbundle', '.appxbundle' } { Add-AppxPackage -Path $installer.FullName -ErrorAction Stop; $proc = $null }
-                    default { throw "Unsupported installer type: $extension" }
+                    '.exe' {
+                        $proc = Start-Process -FilePath $installer.FullName -Wait -PassThru -ErrorAction Stop
+                        Write-Host "Program finished with exit code $($proc.ExitCode)." -ForegroundColor Green
+                        Write-Log "Program exited with code $($proc.ExitCode): $($installer.FullName)"
+                    }
+                    '.msi' {
+                        $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList @('/i', ('"{0}"' -f $installer.FullName)) -Wait -PassThru -ErrorAction Stop
+                        Write-Host "Installer finished with exit code $($proc.ExitCode)." -ForegroundColor Green
+                        Write-Log "Installer exited with code $($proc.ExitCode): $($installer.FullName)"
+                    }
+                    { $_ -in '.msix', '.appx', '.msixbundle', '.appxbundle' } {
+                        Add-AppxPackage -Path $installer.FullName -ErrorAction Stop
+                        Write-Host 'Package installation command completed.' -ForegroundColor Green
+                        Write-Log "Package installation completed: $($installer.FullName)"
+                    }
+                    { $_ -in '.bat', '.cmd' } {
+                        # Run command scripts in a separate CMD window and leave it open for output.
+                        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList ('/k "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
+                        Write-Host "Command script window closed (exit code $($proc.ExitCode))." -ForegroundColor Green
+                        Write-Log "Started command script: $($installer.FullName)"
+                    }
+                    '.ps1' {
+                        # Open PowerShell scripts in a separate, visible PowerShell window.
+                        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
+                        Write-Host 'PowerShell script window closed.' -ForegroundColor Green
+                        Write-Log "Started PowerShell script: $($installer.FullName)"
+                    }
+                    '.vbs' {
+                        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
+                        Write-Host 'VBScript opened.' -ForegroundColor Green
+                        Write-Log "Opened VBScript: $($installer.FullName)"
+                    }
+                    '.js' {
+                        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
+                        Write-Host 'JavaScript file opened.' -ForegroundColor Green
+                        Write-Log "Opened JavaScript file: $($installer.FullName)"
+                    }
+                    default {
+                        # Documents, shortcuts, and any other file type use their Windows default app.
+                        Start-Process -FilePath $installer.FullName -ErrorAction Stop
+                        Write-Host 'Opened file with its default Windows application.' -ForegroundColor Green
+                        Write-Log "Opened file with default application: $($installer.FullName)"
+                    }
                 }
-                if ($null -ne $proc) { Write-Host "Installer finished with exit code $($proc.ExitCode)." -ForegroundColor Green; Write-Log "Installer exited with code $($proc.ExitCode): $($installer.FullName)" }
-                else { Write-Host 'Package installation command completed.' -ForegroundColor Green; Write-Log "Package installation completed: $($installer.FullName)" }
             } catch { Write-Host "Could not install/start installer: $($_.Exception.Message)" -ForegroundColor Red; Write-Log "ERROR installing $($installer.FullName): $($_.Exception.Message)" }
             Pause-Return
         } else { Write-Host 'Installer start cancelled.' -ForegroundColor DarkGray; Start-Sleep -Milliseconds 500 }
