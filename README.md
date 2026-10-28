@@ -1,146 +1,159 @@
-# WinToolKit v1.0.0
 
-**A compact Windows maintenance toolkit by Murdervan**
+# WinToolKit
 
-WinToolKit is a menu-driven PowerShell utility for launching personal software installers, managing a defined list of built-in Windows apps, viewing system information, and keeping a local activity log. It is designed for Windows 10 and Windows 11 and can be stored in a regular folder or on a USB drive.
+### Your Portable Windows Toolkit
+**Made by Murdervan**
 
-> **Important:** WinToolKit requests administrator privileges when it starts. App removal and installers can make system-wide changes. Read each confirmation prompt carefully and only run software you trust.
+**One toolkit. One menu. Ready when you need it.**
 
-## Quick start
+WinToolKit is a portable PowerShell toolkit designed to make Windows setup and maintenance easier. Keep your essential tools together, carry them on a USB stick, and access useful Windows utilities from one simple menu.
 
-1. Download and extract the entire ZIP into one folder. Keep the included files together.
-2. Double-click **`RunAsAdmin.bat`**.
-3. Approve the Windows User Account Control (UAC) prompt if you want to continue.
-4. Use the numbered main menu. Choose **`Q`** to quit.
+Whether you're setting up a new PC, installing your favourite applications, or removing unwanted built-in apps, WinToolKit helps keep the process organised and straightforward.
 
-Start with `RunAsAdmin.bat`, not by double-clicking `WinToolKit.ps1`. The launcher locates the PowerShell script in its own folder and requests elevation. It does not permanently change the machine's PowerShell execution policy.
+No complicated interface. No unnecessary menus. Just practical tools in one place.
 
-## Main menu
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square&logo=windows)
+![Shell](https://img.shields.io/badge/Shell-PowerShell-5391FE?style=flat-square&logo=powershell)
+![Version](https://img.shields.io/badge/Version-v1.0.0-2ea44f?style=flat-square)
+![USB Friendly](https://img.shields.io/badge/USB-Portable-8957e5?style=flat-square)
 
-| Option | What it does |
-|---|---|
-| **1 — Install Custom Apps** | Browse the `Apps` folder and its subfolders, then launch a supported installer. |
-| **2 — Massgrave — Activate Windows & Office** | Connects to the external Microsoft Activation Scripts (MAS) endpoint and runs the script it returns. See the security note below before using it. |
-| **3 — Remove Apps (Standard MS Apps)** | Open the removal tools for selecting one listed app, scanning the app list, viewing or clearing logs, or running the broader removal actions. |
-| **4 — System Info** | Displays Windows and hardware details, including CPU, RAM, graphics adapters and driver versions, physical disks, and fixed drive letters with total and free space. |
-| **5 — Log** | Displays the current WinToolKit activity log. |
-| **6 — About WinToolKit v1.0.0** | Shows project information, opens the project issue page, or opens this README. |
-| **Q — Quit** | Closes WinToolKit. |
+---
 
-## Installing your own apps
+## 📑 Table of Contents
 
-WinToolKit creates an `Apps` folder beside `WinToolKit.ps1` when needed. Put your installers there. You can arrange them into folders to make large collections easier to browse; subfolders are supported.
+- [Features](#-features)
+- [Download](#-download-wintoolkit)
+- [Installation and Setup](#-installation-and-setup)
+- [Install Custom Apps](#-install-custom-apps)
+- [Windows and Office Activation](#-windows-and-office-activation)
+- [Remove Apps](#-remove-apps)
+- [System Information and Logs](#-system-information-and-logs)
+- [Requirements](#-requirements)
+- [Credits](#-credits)
 
-Example layout:
+## ✨ Features
 
-```text
-WinToolKit/
-├── RunAsAdmin.bat
-├── WinToolKit.ps1
-├── README.md
-├── Apps/
-│   ├── Browsers/
-│   │   ├── BrowserSetup.exe
-│   │   └── AnotherBrowser.msi
-│   ├── Utilities/
-│   │   └── UtilitySetup.exe
-│   └── Drivers/
-│       └── ExamplePackage.msix
-└── Logs/
-```
+- **Install Custom Apps** — Launch application installers from your own collection.
+- **Windows & Office Activation** — Access Microsoft Activation Scripts (Massgrave).
+- **Remove Apps** — Remove selected built-in Windows apps.
+- **System Information** — View useful information about the computer.
+- **Logs** — Access WinToolKit logs.
+- **About WinToolKit** — View toolkit information.
 
-Supported installer formats:
+## 📥 Download WinToolKit
 
-- `.exe`
-- `.msi`
-- `.msix`
-- `.appx`
-- `.msixbundle`
-- `.appxbundle`
+**[⬇️ Download the Latest Release](../../releases/latest)**
 
-In the installer browser, enter a folder number to open it. Use **`U`** to move up, **`B`** to go back to the parent folder (or return to the main menu from the `Apps` root), **`O`** to open the current folder in File Explorer, and **`R`** to refresh the listing. Select an installer and type **`RUN`** when prompted to start it; pressing Enter cancels.
+1. Open the latest release on GitHub.
+2. Download the WinToolKit ZIP file.
+3. Save it to your computer or USB stick.
+4. Extract the ZIP before launching the toolkit.
 
-WinToolKit does not install `.zip` archives or arbitrary files as installers. Extract archives yourself and place a supported installer inside `Apps`. The installer may have its own requirements or prompts, and some packages may not be compatible with your Windows edition or device.
+Keep the extracted files together in their original folder structure.
 
-## App removal: read before proceeding
+## 🚀 Installation and Setup
 
-The removal menu offers several different actions, including:
+### Option 1 — Run from Your Computer
 
-- Removing one app from WinToolKit's predefined target list, with confirmation.
-- Scanning installed app packages.
-- Running a mass-removal sequence across the predefined target list.
-- Running the special OneDrive/Xbox removal routine.
-- Viewing or clearing the current log.
+1. Download and extract the ZIP file.
+2. Open the extracted WinToolKit folder.
+3. Run `RunAsAdmin.bat`.
+4. Approve the Windows administrator prompt if requested.
+5. Choose a tool from the menu.
 
-**Mass removal is the high-impact option.** It can remove listed apps for current users and from Windows' provisioned apps for new profiles. It also runs the special OneDrive/Xbox removal routine. WinToolKit requires you to type **`NUKE`** to confirm this action. Review the target list and make sure you have backups or a recovery plan before proceeding. Do not use it simply to experiment.
+### Option 2 — Run from a USB Stick
 
-Removing a built-in app can affect Windows features or workflows that depend on it. Results vary by Windows version, installed packages, policy, and permissions. WinToolKit cannot guarantee that every removal will succeed or be reversible.
+WinToolKit is designed to be convenient to carry between compatible Windows PCs.
 
-## Massgrave and external scripts
+1. Download and extract the ZIP file.
+2. Copy the extracted WinToolKit files to your USB stick.
+3. Connect the USB stick to the target PC.
+4. Open the WinToolKit folder on the USB stick.
+5. Run `RunAsAdmin.bat`.
+6. Select the feature you want to use.
 
-Menu option **2** retrieves code from `https://get.activated.win` and executes the returned content. This requires an internet connection and means code from outside this ZIP is run with the permissions of the elevated PowerShell process.
+**Tip:** Keep `RunAsAdmin.bat`, `WinToolKit.ps1`, and the supporting files together. Do not move individual files out of the toolkit folder.
 
-Only proceed if you have independently checked the source and understand the implications. The upstream project is **Microsoft Activation Scripts (MAS)**:
+## 📦 Install Custom Apps
 
-- Official source repository: <https://github.com/massgravel/Microsoft-Activation-Scripts>
-- Project website and documentation: <https://massgrave.dev/>
+The custom app installer lets you keep your own collection of application installers with WinToolKit. This is useful when setting up a PC and installing the software you regularly use.
 
-Always verify the URL and review the upstream documentation before running activation tools. WinToolKit does not provide a Windows or Office licence; users are responsible for complying with applicable licence terms.
+### How It Works
 
-## Logs
+1. Open the WinToolKit folder.
+2. Find the `Apps` folder.
+3. Place your supported application installer files or required app folders inside it.
+4. Start WinToolKit using `RunAsAdmin.bat`.
+5. Open **Install Custom Apps** from the menu.
+6. Select the application you want.
+7. The selected application's installer starts.
 
-WinToolKit creates timestamped log files in the `Logs` folder beside the script. The log records selected actions and errors to help with troubleshooting.
+You can then follow the installation instructions displayed by that application.
 
-If the program cannot write to that location—for example, when the toolkit is on a write-protected USB drive—it attempts to use:
+### Important Notes
 
-```text
-%LOCALAPPDATA%\WinToolKit\Logs
-```
+- WinToolKit does not automatically include every third-party application.
+- You are responsible for adding the installers you want to use.
+- Use installers from trusted sources.
+- The installer must be in a format and folder structure supported by WinToolKit.
 
-If neither location is writable, logging may be unavailable. Log files are local text files; review them before sharing because they may contain file paths, device details, or action history.
+This makes it possible to keep your own application collection on a USB stick and use it when preparing another PC.
 
-## Requirements
+## 🔑 Windows and Office Activation
 
-- Windows 10 or Windows 11.
-- Windows PowerShell 5.1 (included with supported Windows installations).
-- Administrator approval to start WinToolKit.
-- Internet access for the Massgrave option and for any installer that needs to download files.
-- Sufficient free space and write permissions for log files and any installer you run.
+WinToolKit provides access to **Microsoft Activation Scripts (Massgrave)**, a separate project that offers Windows and Office activation options.
 
-Use an up-to-date Windows installation where possible. WinToolKit is designed for Windows, and it has not been validated on Linux, macOS, or non-standard PowerShell hosts.
+### How to Use It
 
-## Troubleshooting
+1. Start WinToolKit.
+2. Select the Windows and Office activation option.
+3. Follow the instructions provided by Microsoft Activation Scripts.
 
-**The window closes or WinToolKit does not start**
+An internet connection may be required.
 
-- Extract the ZIP completely; do not run the files from inside the ZIP viewer.
-- Confirm that `RunAsAdmin.bat` and `WinToolKit.ps1` are in the same folder.
-- Launch `RunAsAdmin.bat` and approve the UAC prompt.
-- If the problem persists, open Command Prompt in the extracted folder and run `RunAsAdmin.bat` there so any displayed error remains visible.
+Use activation methods appropriate for your licence and software entitlement.
 
-**An installer is missing from the list**
+**Official project:** [Microsoft Activation Scripts on GitHub](https://github.com/massgravel/Microsoft-Activation-Scripts)
 
-- Confirm that it is inside `Apps` or one of its subfolders.
-- Confirm that its extension is one of the supported formats listed above.
-- Press `R` to refresh the list.
+## 🧹 Remove Apps
 
-**An installer fails**
+This feature helps you remove selected built-in Microsoft apps that you do not need.
 
-Check the installer's own requirements and error message. WinToolKit starts the installer or Windows package installation command; it cannot fix a broken installer, missing prerequisite, incompatible architecture, or Windows policy restriction.
+### How to Use It
 
-**Massgrave does not start**
+1. Start WinToolKit.
+2. Select **Remove Apps**.
+3. Review the available apps.
+4. Choose the app or apps you want to remove.
+5. Follow any prompts shown by WinToolKit.
 
-Check the internet connection and consult the official MAS documentation and troubleshooting guidance. Do not replace the endpoint with a URL from an unknown source.
+Removing certain apps may affect Windows features or other software that depends on them. Review your selections before proceeding.
 
-**Logs are missing**
+## 💻 System Information and Logs
 
-Check both the local `Logs` folder and `%LOCALAPPDATA%\WinToolKit\Logs`. Logging can fail if both locations are unavailable or not writable.
+### System Information
 
-## Project and version
+Use this option to view useful information about the Windows computer you are working on. It can be helpful when checking a system or troubleshooting an issue.
 
-- **Project:** WinToolKit
-- **Author:** Murdervan
-- **Version:** 1.0.0
-- **Issue tracker:** <https://github.com/murdervan/WinToolKit/issues>
+### Logs
 
-The version remains **1.0.0** while this build is being developed. Inspect scripts before running them with administrator privileges. A successful ZIP integrity check does not replace testing on the Windows system where you intend to use the toolkit.
+Use the log option to access available WinToolKit logs. Logs can help you review activity and investigate problems when a supported feature does not behave as expected.
+
+## ⚙️ Requirements
+
+- Windows 10 or Windows 11
+- Windows PowerShell
+- Administrator permissions for certain features
+- Internet connection for online downloads and activation scripts
+
+## 🙏 Credits
+
+Windows and Office activation is powered by [Microsoft Activation Scripts](https://github.com/massgravel/Microsoft-Activation-Scripts).
+
+WinToolKit is a separate project and is not affiliated with the Microsoft Activation Scripts project.
+
+## 📌 Version
+
+**WinToolKit v1.0.0**
+
+Created by **Murdervan**.
