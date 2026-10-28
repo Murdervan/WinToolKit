@@ -1,4 +1,3 @@
-
 # WinToolKit
 
 ### Your Portable Windows Toolkit
@@ -90,6 +89,21 @@ The custom app installer lets you keep your own collection of application instal
 
 You can then follow the installation instructions displayed by that application.
 
+### Why Keep Installers in the `Apps` Folder?
+
+The `Apps` folder lets you store application installers alongside WinToolKit so they are available when you need them offline.
+
+- **Offline installation** — Install applications without downloading the installer again, as long as the installer includes all required files.
+- **USB portability** — Carry WinToolKit and your installers on a USB stick and use them on another compatible Windows PC offline.
+- **Faster setup** — Reuse the same installer files when setting up or reinstalling a PC.
+- **Your own app collection** — Choose which installers and versions you want to keep available.
+
+WinToolKit does not include third-party installers by default, so you add the installers you want to use yourself.
+
+**Important:** Not every installer works offline. Some installers are only small downloaders and still need an internet connection to download the application files. For the best offline experience, use complete offline installers from the application's official website.
+
+Keep the installers in the folder structure supported by WinToolKit so the toolkit can detect and launch them.
+
 ### Important Notes
 
 - WinToolKit does not automatically include every third-party application.
@@ -144,7 +158,7 @@ Use the log option to access available WinToolKit logs. Logs can help you review
 - Windows 10 or Windows 11
 - Windows PowerShell
 - Administrator permissions for certain features
-- Internet connection for online downloads and activation scripts
+- Internet connection for online activation scripts
 
 ## 🙏 Credits
 
