@@ -804,7 +804,8 @@ function Test-AppScanRegistryEntry {
         'OneNote' = '(?i)^(?:Microsoft )?OneNote(?:\s|$|\()'
         'Edge WebView2' = '(?i)^Microsoft Edge WebView2 Runtime(?:\s|$|\()'
         'Power Automate' = '(?i)^(?:Microsoft )?Power Automate(?: for desktop| Desktop)?(?:\s|$|\()'
-        'Outlook New' = '(?i)^(?:Microsoft )?Outlook \(new\)(?:\s|$|\()'
+        # Outlook (new) deliberately has no Uninstall-registry fallback. Stale
+        # uninstall entries can remain after the AppX app has been removed.
     }
     if (-not $patterns.ContainsKey([string]$App.N)) { return $false }
     $pattern = $patterns[[string]$App.N]
@@ -850,8 +851,24 @@ function Show-AppScan {
     $officeState = Get-AppScanOfficeState -RegistryEntries $registryEntries
     $packagePatterns = Get-AppScanPackagePatterns
 
+    # Keep a separate current-account inventory. Get-AppxPackage -AllUsers may
+    # still return a package registered for another Windows account (or package
+    # metadata left behind), which must not make Outlook New appear installed
+    # for the account running this scanner.
+    $currentUserInstalled = @()
+    $currentUserAppxCheckComplete = $false
+    try {
+        $currentUserInstalled = @(Get-AppxPackage -ErrorAction Stop)
+        $currentUserAppxCheckComplete = $true
+    } catch {
+        Write-Log "APP SCAN: current-account Get-AppxPackage check failed: $($_.Exception.Message)"
+    }
+
     if ($appxScope -ne 'all users') {
         Write-Host "NOTE: AppX results cover $appxScope." -ForegroundColor Yellow
+    }
+    if (-not $currentUserAppxCheckComplete) {
+        Write-Host 'NOTE: Could not verify AppX packages for the current Windows account; Outlook New may show UNKNOWN.' -ForegroundColor Yellow
     }
     if (-not $provisionedCheckComplete) {
         Write-Host 'NOTE: Windows could not read provisioned package state; some Store results may be incomplete.' -ForegroundColor Yellow
@@ -865,6 +882,7 @@ function Show-AppScan {
         Write-Host "`n--- $cat ---" -ForegroundColor Cyan
         foreach ($app in $script:Categories[$cat]) {
             $appxMatches = @()
+            $outlookPackageExistsOutsideCurrentAccount = $false
             foreach ($pkg in $installed) {
                 $identifiers = @($pkg.Name, $pkg.PackageFamilyName, $pkg.PackageFullName)
                 $matched = $false
@@ -874,6 +892,37 @@ function Show-AppScan {
                     }
                 }
                 if ($matched) { $appxMatches += $pkg }
+            }
+
+            if ($app.N -eq 'Outlook New') {
+                # Outlook New is an AppX/MSIX app. Trust the current account's
+                # package registration, not a broad all-users result or a stale
+                # Add/Remove Programs registry entry.
+                $allUserOutlookMatches = @($appxMatches)
+                $currentUserOutlookMatches = @()
+                if ($currentUserAppxCheckComplete) {
+                    foreach ($pkg in $currentUserInstalled) {
+                        $identifiers = @($pkg.Name, $pkg.PackageFamilyName, $pkg.PackageFullName)
+                        $matched = $false
+                        foreach ($identifier in $identifiers) {
+                            if (Test-AppScanIdentifier -App $app -Identifier ([string]$identifier) -PackagePatterns $packagePatterns) {
+                                $matched = $true
+                                break
+                            }
+                        }
+                        if ($matched) { $currentUserOutlookMatches += $pkg }
+                    }
+                    if ($currentUserOutlookMatches.Count -gt 0) {
+                        $appxMatches = @($currentUserOutlookMatches)
+                    } else {
+                        $appxMatches = @()
+                        $outlookPackageExistsOutsideCurrentAccount = ($allUserOutlookMatches.Count -gt 0)
+                    }
+                } else {
+                    # The current-account check failed, so don't guess from the
+                    # all-users query whether the app is installed for this user.
+                    $appxMatches = @()
+                }
             }
 
             $provisionedMatches = @()
@@ -923,6 +972,14 @@ function Show-AppScan {
                 $uniqueSources = @($sources | Select-Object -Unique)
                 Write-Host "  [INSTALLED] $($app.N) ($($uniqueSources -join '; '))" -ForegroundColor Green
                 Write-Log "APP SCAN: INSTALLED: $($app.N) - $($uniqueSources -join '; ')"
+            } elseif ($app.N -eq 'Outlook New' -and -not $currentUserAppxCheckComplete) {
+                $unknown++
+                Write-Host '  [UNKNOWN] Outlook New (could not verify current Windows account)' -ForegroundColor Yellow
+                Write-Log 'APP SCAN: UNKNOWN: Outlook New - current-account AppX check failed'
+            } elseif ($app.N -eq 'Outlook New' -and $outlookPackageExistsOutsideCurrentAccount) {
+                $missing++
+                Write-Host "  [NOT FOUND] $($app.N)" -ForegroundColor DarkGray
+                Write-Log 'APP SCAN: NOT INSTALLED FOR CURRENT USER: Outlook New - all-users package entry only; current-user registration not found'
             } elseif ($provisionedMatches.Count -gt 0) {
                 $provisionedOnlyCount++
                 Write-Host "  [PROVISIONED ONLY] $($app.N) (new user profiles)" -ForegroundColor Yellow
