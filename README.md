@@ -29,6 +29,7 @@ No complicated interface. No unnecessary menus. Just practical tools in one plac
 - [System Information and Logs](#-system-information-and-logs)
 - [Requirements](#-requirements)
 - [Credits](#-credits)
+- [WinToolKit — Menu Preview](#wintoolkit--menu-preview)
 
 ## ✨ Features
 
