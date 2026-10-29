@@ -22,7 +22,7 @@ No complicated interface. No unnecessary menus. Just practical tools in one plac
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square&logo=windows)
 ![Shell](https://img.shields.io/badge/Shell-PowerShell-5391FE?style=flat-square&logo=powershell)
-![Version](https://img.shields.io/badge/Version-v1.0.0-2ea44f?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v1.0.1-2ea44f?style=flat-square)
 ![USB Friendly](https://img.shields.io/badge/USB-Portable-8957e5?style=flat-square)
 
 ---
@@ -176,9 +176,7 @@ Windows and Office activation is powered by [Microsoft Activation Scripts](https
 
 WinToolKit is a separate project and is not affiliated with the Microsoft Activation Scripts project.
 
-## 📌 Version
-
-**WinToolKit v1.0.0**
+## 📌 Created by
 
 Created by **Murdervan**.
 
@@ -204,8 +202,8 @@ This page provides a text-based preview of the toolkit's main menu and its avail
 ╚███╔███╔╝██║██║ ╚████║       ██║   ╚██████╔╝╚██████╔╝███████╗    ██║  ██╗██║   ██║
  ╚══╝╚══╝ ╚═╝╚═╝  ╚═══╝       ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝    ╚═╝  ╚═╝╚═╝   ╚═╝
 
-                                  by Murdervan
-                                  Version 1.0.0
+                                 by Murdervan
+                                 Version 1.0.1
 
 MAIN MENU
 ----------------------------------------------
@@ -213,12 +211,11 @@ MAIN MENU
 [2] Massgrave - Activate Windows & Office
 [3] Remove Apps (Standard MS Apps)
 [4] System Info
-[5] Log
-[6] About WinToolKit v1.0.0
+[5] Log Info
+[6] Update WinToolKit
+[7] About WinToolKit v1.0.1
 [Q] Quit
 ----------------------------------------------
-
-Choose (1-6, Q):
 ```
 
 The main menu gives quick access to the toolkit's primary features.
