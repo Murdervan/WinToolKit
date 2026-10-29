@@ -49,7 +49,7 @@ Browse folders, open them in Explorer, or choose a file to run/open.
 
 Current folder: ...\WinToolKit\Apps
 
-[ 1] [FOLDER] Offline
+[ 1] [FOLDER] Gaming apps
 [ 2] [FOLDER] Other
 [ 3] ChromeSetup.exe  (.EXE)
 [ 4] VLC-Installer.exe (.EXE)
@@ -84,7 +84,7 @@ Only run installers you trust; they may make system-wide changes.
 Type RUN to start, or press Enter to cancel:
 ```
 
-The `Apps` folder can contain installers you want to keep available without downloading them again. Offline installation still depends on whether the particular installer want internet or not.
+The `Apps` folder can contain installers you want to keep available without downloading them again. Offline installation still depends on whether the particular installer/apps want internet or not.
 
 ---
 
