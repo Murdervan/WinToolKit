@@ -1,5 +1,5 @@
 ﻿# WinToolKit by Murdervan
-# Version: 1.2.1
+# Version: 1.0.0
 # Windows 10 / Windows 11
 # PowerShell 5.1 compatible
 
