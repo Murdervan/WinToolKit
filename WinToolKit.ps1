@@ -1653,7 +1653,7 @@ function Invoke-WinToolKitUpdate {
             throw 'The downloaded release did not contain WinToolKit.ps1. No files were changed.'
         }
         $sourceText = Get-Content -LiteralPath $sourceScript.FullName -Raw -ErrorAction Stop
-        $versionMatch = [regex]::Match($sourceText, "(?m)^`$script:ToolVersion\s*=\s*'([^']+)'")
+        $versionMatch = [regex]::Match($sourceText, '(?m)^\s*\$script:ToolVersion\s*=\s*[''"]([^''"]+)[''"]')
         if (-not $versionMatch.Success) {
             throw 'The downloaded script does not declare a recognizable WinToolKit version. No files were changed.'
         }
