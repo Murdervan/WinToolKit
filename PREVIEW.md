@@ -85,7 +85,7 @@ The `Apps` folder can contain installers you want to keep available without down
 
 ---
 
-## 3. Windows & Office Activation
+## 3. Windows & Office Activation 
 
 WinToolKit provides access to Microsoft Activation Scripts (Massgrave).
 
@@ -95,7 +95,8 @@ Starting Massgrave...
 This runs the external Massgrave script, as requested.
 ```
 
-An internet connection is normally required to retrieve the external script.
+<b>An internet connection is required to retrieve the external script.</b>
+
 
 Official project:
 
