@@ -1,18 +1,23 @@
 ﻿# WinToolKit by Murdervan
-# Version: 1.0.0
+# Version: 1.0.1
 # Windows 10 / Windows 11
 # PowerShell 5.1 compatible
 
 $ErrorActionPreference = 'Continue'
-$script:ToolVersion = '1.0.0'
+$script:ToolVersion = '1.0.1'
 $script:ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($script:ToolRoot)) {
     $script:ToolRoot = (Get-Location).Path
 }
 $script:AppsPath = Join-Path $script:ToolRoot 'Apps'
 $script:LogsPath = Join-Path $script:ToolRoot 'Logs'
-$script:LogFile = $null
+$script:LogFile = $null                 # WinToolKit-wide activity log
+$script:RemovalLogFile = $null          # Separate Remove Apps log
+$script:LogContext = $null
+$script:ScriptPath = $MyInvocation.MyCommand.Path
 $script:IssuesUrl = 'https://github.com/murdervan/WinToolKit/issues'
+$script:GitHubRepoUrl = 'https://github.com/murdervan/WinToolKit'
+$script:GitHubLatestReleaseApi = 'https://api.github.com/repos/murdervan/WinToolKit/releases/latest'
 
 # Keep the classic console compact; ignore hosts that do not expose RawUI sizing.
 try {
@@ -144,25 +149,29 @@ function Test-IsAdministrator {
 }
 
 function Initialize-Log {
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
     try {
         if (-not (Test-Path -LiteralPath $script:LogsPath)) {
             New-Item -ItemType Directory -Path $script:LogsPath -Force -ErrorAction Stop | Out-Null
         }
-        $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
         $script:LogFile = Join-Path $script:LogsPath "WinToolKit_$stamp.log"
+        $script:RemovalLogFile = Join-Path $script:LogsPath "RemoveApps_$stamp.log"
         New-Item -ItemType File -Path $script:LogFile -Force -ErrorAction Stop | Out-Null
+        New-Item -ItemType File -Path $script:RemovalLogFile -Force -ErrorAction Stop | Out-Null
     } catch {
         # USB may be write-protected. Fall back to a user-local log location.
         try {
             $fallback = Join-Path $env:LOCALAPPDATA 'WinToolKit\Logs'
             New-Item -ItemType Directory -Path $fallback -Force -ErrorAction Stop | Out-Null
-            $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
             $script:LogFile = Join-Path $fallback "WinToolKit_$stamp.log"
+            $script:RemovalLogFile = Join-Path $fallback "RemoveApps_$stamp.log"
             New-Item -ItemType File -Path $script:LogFile -Force -ErrorAction Stop | Out-Null
-            Write-Host "[NOTICE] USB logging is unavailable. Logs will be saved locally:" -ForegroundColor Yellow
+            New-Item -ItemType File -Path $script:RemovalLogFile -Force -ErrorAction Stop | Out-Null
+            Write-Host '[NOTICE] USB logging is unavailable. Logs will be saved locally:' -ForegroundColor Yellow
             Write-Host "         $fallback" -ForegroundColor Yellow
         } catch {
             $script:LogFile = $null
+            $script:RemovalLogFile = $null
             Write-Host '[WARNING] Logging is unavailable because no writable log location was found.' -ForegroundColor Yellow
         }
     }
@@ -171,9 +180,20 @@ function Initialize-Log {
 function Write-Log {
     param([Parameter(Mandatory=$true)][string]$Message)
     $entry = '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+
+    # The main log always records WinToolKit-wide activity.
     if ($script:LogFile) {
         try { Add-Content -LiteralPath $script:LogFile -Value $entry -Encoding UTF8 -ErrorAction Stop }
-        catch { Write-Host '[WARNING] Could not write to the log file.' -ForegroundColor Yellow }
+        catch { Write-Host '[WARNING] Could not write to the WinToolKit activity log.' -ForegroundColor Yellow }
+    }
+
+    # While a Remove Apps action is running, mirror its entries to a separate log.
+    if ($script:LogContext -eq 'RemoveApps' -and $script:RemovalLogFile) {
+        try { Add-Content -LiteralPath $script:RemovalLogFile -Value $entry -Encoding UTF8 -ErrorAction Stop }
+        catch {
+            $script:RemovalLogFile = $null
+            Write-Host '[WARNING] Could not write to the Remove Apps log.' -ForegroundColor Yellow
+        }
     }
 }
 
@@ -642,23 +662,14 @@ function Show-AppSelection {
         Write-Host '[B] Back' -ForegroundColor Yellow
         $sel = Read-Host 'Enter an app number'
         if ($sel -match '^[bB]$') {
-            # In folder browsing, Back means parent folder; at Apps root it returns to main menu.
-            if ($currentFolder -ne $script:AppsPath) {
-                $parent = Split-Path -Parent $currentFolder
-                if ($parent -and ($parent -eq $script:AppsPath -or $parent.StartsWith($script:AppsPath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) {
-                    $currentFolder = $parent
-                } else {
-                    $currentFolder = $script:AppsPath
-                }
-                continue
-            }
+            # This is a fixed app list, not a folder browser: always return to the removal menu.
             return
         }
         $number = 0
         if ([int]::TryParse($sel, [ref]$number) -and $indexMap.ContainsKey($number)) {
             $app = $indexMap[$number]
             Remove-App -Name $app.Name -Package $app.Package
-            Pause-Return
+            # Return directly to the list so another app can be selected without an extra Enter.
         } else {
             Write-Host 'Invalid selection.' -ForegroundColor Yellow
             Start-Sleep -Seconds 1
@@ -697,20 +708,27 @@ function Show-RemovalMenu {
         Write-Host '[2] Mass removal of all listed apps'
         Write-Host '[3] Force removal: OneDrive and Xbox'
         Write-Host '[4] Scan app list'
-        Write-Host '[5] View log'
-        Write-Host '[6] Clear log'
-        Write-Host '[B] Back to main menu'
+        Write-Host '[5] View Remove Apps log'
+        Write-Host '[6] Clear Remove Apps log'
+        Write-Host '[B] Back to main menu' -ForegroundColor Yellow
         Write-Host ''
-        $choice = Read-Host 'Select an option'
-        switch ($choice.ToUpperInvariant()) {
-            '1' { Show-AppSelection }
-            '2' { Invoke-MassRemoval }
-            '3' { Force-Remove-SpecialApps; Pause-Return }
-            '4' { Show-AppScan }
-            '5' { Show-Log }
-            '6' { Clear-Log }
-            'B' { return }
-            default { Write-Host 'Invalid selection.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+        $choice = (Read-Host 'Select an option').Trim()
+        $previousLogContext = $script:LogContext
+        $script:LogContext = 'RemoveApps'
+        try {
+            Write-Log "Remove Apps menu selection: $choice"
+            switch ($choice.ToUpperInvariant()) {
+                '1' { Show-AppSelection }
+                '2' { Invoke-MassRemoval }
+                '3' { Force-Remove-SpecialApps; Pause-Return }
+                '4' { Show-AppScan }
+                '5' { Show-Log -ReturnToRemovalMenu }
+                '6' { Clear-Log }
+                'B' { return }
+                default { Write-Host 'Invalid selection.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+            }
+        } finally {
+            $script:LogContext = $previousLogContext
         }
     }
 }
@@ -1108,38 +1126,138 @@ function Show-AppScan {
     Pause-Return
 }
 
-function Show-Log {
-    Clear-Host
-    Write-Host 'ACTIVITY LOG' -ForegroundColor Green
+function Read-LogMenuChoice {
+    # Match the About menu: type a choice and press Enter to confirm it.
+    return (Read-Host 'Select an option').Trim()
+}
+
+function Wait-ForLogMenuKey {
+    param([string]$Message = 'Press Enter to return to the log menu')
     Write-Host ''
-    if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
-        Get-Content -LiteralPath $script:LogFile
-        Write-Host "`nCurrent log: $script:LogFile" -ForegroundColor DarkGray
-    } else {
-        Write-Host 'No log entries are available.' -ForegroundColor Yellow
+    [void](Read-Host $Message)
+}
+
+function Show-Log {
+    param([switch]$ReturnToRemovalMenu)
+
+    while ($true) {
+        if ($ReturnToRemovalMenu) {
+            $logPath = $script:RemovalLogFile
+            $logTitle = 'REMOVE APPS LOG'
+            $backLabel = '[B] Back to Remove Apps menu'
+        } else {
+            $logPath = $script:LogFile
+            $logTitle = 'WINTOOLKIT ACTIVITY LOG'
+            $backLabel = '[B] Back to main menu'
+        }
+
+        Clear-Host
+        Write-Host $logTitle -ForegroundColor Green
+        Write-Host ''
+        if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+            Write-Host "Current log: $logPath" -ForegroundColor DarkGray
+        } else {
+            Write-Host 'No current log file is available yet.' -ForegroundColor Yellow
+        }
+        Write-Host ''
+        Write-Host '[1] View log in this window'
+        Write-Host '[2] Open log in a separate PowerShell window'
+        Write-Host '[3] Open log folder in Explorer'
+        Write-Host $backLabel -ForegroundColor Yellow
+        Write-Host ''
+        # Same input style as About: type the choice and press Enter.
+        $choice = Read-LogMenuChoice
+        if ([string]::IsNullOrWhiteSpace($choice)) { continue }
+        if ($ReturnToRemovalMenu) {
+            Write-Log "Remove Apps log menu selection: $choice"
+        } else {
+            Write-Log "WinToolKit activity log menu selection: $choice"
+        }
+
+        switch ($choice) {
+            '1' {
+                Clear-Host
+                Write-Host $logTitle -ForegroundColor Green
+                Write-Host ''
+                if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+                    try {
+                        Get-Content -LiteralPath $logPath -ErrorAction Stop
+                        Write-Host "`nCurrent log: $logPath" -ForegroundColor DarkGray
+                    } catch {
+                        Write-Host "Could not read the log: $($_.Exception.Message)" -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host 'No log entries are available.' -ForegroundColor Yellow
+                }
+                Wait-ForLogMenuKey -Message 'Press Enter to return to Log Info'
+            }
+            '2' {
+                if (-not ($logPath -and (Test-Path -LiteralPath $logPath))) {
+                    Write-Host 'No current log file is available to open.' -ForegroundColor Yellow
+                    Wait-ForLogMenuKey -Message 'Press Enter to return to Log Info'
+                    continue
+                }
+                try {
+                    # Encode the command to avoid quoting issues with spaces or special characters in paths.
+                    $safeLogPath = $logPath.Replace("'", "''")
+                    $psCommand = "Get-Content -LiteralPath '$safeLogPath' | Out-Host; Write-Host ''; Write-Host 'Log view finished. Press Enter to continue in PowerShell.'; [void](Read-Host)"
+                    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($psCommand))
+                    Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile -NoExit -EncodedCommand $encodedCommand" -ErrorAction Stop
+                    Write-Log "Opened log in a separate PowerShell window: $logPath"
+                    Write-Host 'Opened the selected log in a separate PowerShell window.' -ForegroundColor Green
+                } catch {
+                    Write-Host "Could not open the log in PowerShell: $($_.Exception.Message)" -ForegroundColor Red
+                    Wait-ForLogMenuKey -Message 'Press Enter to return to Log Info'
+                }
+            }
+            '3' {
+                try {
+                    if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+                        $logFolder = Split-Path -Parent $logPath
+                    } else {
+                        $logFolder = $script:LogsPath
+                        if (-not (Test-Path -LiteralPath $logFolder)) {
+                            New-Item -ItemType Directory -Path $logFolder -Force -ErrorAction Stop | Out-Null
+                        }
+                    }
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $logFolder) -ErrorAction Stop
+                    Write-Log "Opened log folder in Explorer: $logFolder"
+                    Write-Host "Opened log folder: $logFolder" -ForegroundColor Green
+                } catch {
+                    Write-Host "Could not open the log folder: $($_.Exception.Message)" -ForegroundColor Red
+                    Wait-ForLogMenuKey -Message 'Press Enter to return to Log Info'
+                }
+            }
+            'B' { return }
+            default { Write-Host 'Invalid selection. Enter 1, 2, 3, or B.' -ForegroundColor Yellow; Start-Sleep -Milliseconds 800 }
+        }
     }
-    Pause-Return
 }
 
 function Clear-Log {
     Write-Host ''
-    Write-Host 'This clears the current log file only.' -ForegroundColor Yellow
+    Write-Host 'This clears the Remove Apps log only. The WinToolKit activity log is not changed.' -ForegroundColor Yellow
     $confirm = Read-Host 'Type CLEAR to continue, or press Enter to cancel'
     if ($confirm -cne 'CLEAR') {
-        Write-Log 'Cancelled log clearing.'
+        Write-Log 'Cancelled Remove Apps log clearing.'
         Write-Host 'Log clearing cancelled.' -ForegroundColor Cyan
         return
     }
-    if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
+    if ($script:RemovalLogFile -and (Test-Path -LiteralPath $script:RemovalLogFile)) {
         try {
-            Clear-Content -LiteralPath $script:LogFile -ErrorAction Stop
-            Write-Log 'Log cleared by user.'
-            Write-Host 'Current log cleared.' -ForegroundColor Green
+            Clear-Content -LiteralPath $script:RemovalLogFile -ErrorAction Stop
+            # Record the clear operation in the general log only, so the cleared
+            # Remove Apps log remains empty instead of immediately gaining a new entry.
+            $previousLogContext = $script:LogContext
+            $script:LogContext = $null
+            try { Write-Log 'Remove Apps log cleared by user.' }
+            finally { $script:LogContext = $previousLogContext }
+            Write-Host 'Remove Apps log cleared. The WinToolKit activity log was preserved.' -ForegroundColor Green
         } catch {
-            Write-Host "Could not clear log: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "Could not clear the Remove Apps log: $($_.Exception.Message)" -ForegroundColor Red
         }
     } else {
-        Write-Host 'No current log file exists.' -ForegroundColor Yellow
+        Write-Host 'No Remove Apps log file exists.' -ForegroundColor Yellow
     }
     Pause-Return
 }
@@ -1180,7 +1298,8 @@ function Install-CustomApp {
         }
         if ($n -eq 1) { Write-Host 'No folders or files in this location.' -ForegroundColor DarkGray }
         Write-Host ''
-        Write-Host '[O] Open current folder in Explorer   [U] Up   [R] Refresh   [B] Back' -ForegroundColor Green
+        Write-Host -NoNewline '[O] Open current folder in Explorer   [R] Refresh   ' -ForegroundColor Green
+        Write-Host '[B] Back' -ForegroundColor Yellow
         $sel = (Read-Host 'Choose a number or action').Trim()
         if ($sel -match '^[bB]$') {
             # In folder browsing, Back means parent folder; at Apps root it returns to main menu.
@@ -1199,14 +1318,6 @@ function Install-CustomApp {
         if ($sel -match '^[oO]$') {
             try { Start-Process explorer.exe -ArgumentList ('"{0}"' -f $currentFolder) -ErrorAction Stop }
             catch { Write-Host "Could not open folder: $($_.Exception.Message)" -ForegroundColor Red; Pause-Return }
-            continue
-        }
-        if ($sel -match '^[uU]$') {
-            if ($currentFolder -ne $script:AppsPath) {
-                $parent = Split-Path -Parent $currentFolder
-                if ($parent.StartsWith($script:AppsPath, [StringComparison]::OrdinalIgnoreCase) -or $parent -eq $script:AppsPath) { $currentFolder = $parent }
-                else { $currentFolder = $script:AppsPath }
-            }
             continue
         }
         $number = 0
@@ -1354,14 +1465,15 @@ function Show-About {
         Write-Host 'ABOUT WINTOOLKIT' -ForegroundColor Green
         Write-Host ''
         Write-Host 'WinToolKit by Murdervan' -ForegroundColor Green
-        Write-Host "Version: $script:ToolVersion"
-        Write-Host 'Purpose: Manage selected built-in Windows apps, launch personal installers, and view system information.'
-        Write-Host 'Platform: Windows 10 and Windows 11'
-        Write-Host 'Designed for portable use from a USB drive where Windows permissions allow it.'
+        Write-Host "Version: v$script:ToolVersion"
+        Write-Host 'A portable Windows toolkit for everyday setup and maintenance.'
+        Write-Host 'Install your own apps, remove selected built-in apps, and view system information and logs.'
+        Write-Host 'Supports Windows 10/11 and Windows PowerShell 5.1; can run from a folder or USB drive.'
+        Write-Host 'Administrator rights are required for system-wide changes. Review app-removal prompts carefully.'
         Write-Host ''
         Write-Host '[1] Open WinToolKit GitHub Issues'
         Write-Host '[2] Open README.md'
-        Write-Host '[B] Back to main menu'
+        Write-Host '[B] Back to main menu' -ForegroundColor Yellow
         Write-Host ''
         $choice = Read-Host 'Select an option'
         switch ($choice.ToUpperInvariant()) {
@@ -1447,6 +1559,198 @@ function Write-PanelLine {
     Write-Host ('| ' + $Left.PadRight($LeftWidth) + ' | ' + $Right.PadRight($RightWidth) + ' |') -ForegroundColor Cyan
 }
 
+function ConvertTo-WinToolKitVersion {
+    param([string]$VersionText)
+    if ([string]::IsNullOrWhiteSpace($VersionText)) { return $null }
+    $normalized = $VersionText.Trim() -replace '^[vV]', ''
+    try { return [version]$normalized } catch { return $null }
+}
+
+function Invoke-WinToolKitUpdate {
+    Clear-Host
+    Write-Host 'UPDATE WINTOOLKIT' -ForegroundColor Green
+    Write-Host ('=' * 48) -ForegroundColor DarkCyan
+    Write-Host "Installed version: v$script:ToolVersion"
+    Write-Host 'Checking the latest published GitHub release...' -ForegroundColor Gray
+    Write-Host ''
+
+    try {
+        # Windows PowerShell 5.1 may default to older TLS settings on some PCs.
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        } catch {}
+        $release = Invoke-RestMethod -Uri $script:GitHubLatestReleaseApi `
+            -Headers @{ 'Accept' = 'application/vnd.github+json'; 'User-Agent' = 'WinToolKit' } `
+            -UseBasicParsing -TimeoutSec 25 -ErrorAction Stop
+    } catch {
+        Write-Host "Could not contact GitHub: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "UPDATE CHECK FAILED: $($_.Exception.Message)"
+        Pause-Return
+        return
+    }
+
+    $currentVersion = ConvertTo-WinToolKitVersion -VersionText $script:ToolVersion
+    $latestVersion = ConvertTo-WinToolKitVersion -VersionText ([string]$release.tag_name)
+    if ($null -eq $latestVersion -or $null -eq $currentVersion) {
+        Write-Host 'GitHub returned a version number WinToolKit could not understand. No files were changed.' -ForegroundColor Red
+        Write-Log "UPDATE CHECK FAILED: invalid version tag '$($release.tag_name)'"
+        Pause-Return
+        return
+    }
+
+    $releaseVersionText = ([string]$release.tag_name -replace '^[vV]', '')
+    if ($latestVersion -le $currentVersion) {
+        if ($latestVersion -lt $currentVersion) {
+            Write-Host "GitHub's latest release is v$releaseVersionText; this local copy is newer (v$script:ToolVersion)." -ForegroundColor Yellow
+            Write-Host 'No downgrade was performed. Publish a newer GitHub release to make it available here.' -ForegroundColor Gray
+        } else {
+            Write-Host "You already have the latest released version (v$releaseVersionText)." -ForegroundColor Green
+        }
+        Write-Log "UPDATE CHECK: local=v$script:ToolVersion latest=v$releaseVersionText; no update needed"
+        Pause-Return
+        return
+    }
+
+    Write-Host "New version available: v$releaseVersionText" -ForegroundColor Green
+    if (-not [string]::IsNullOrWhiteSpace([string]$release.html_url)) {
+        Write-Host "Release notes: $($release.html_url)" -ForegroundColor DarkGray
+    }
+    Write-Host 'Your Apps and Logs folders will not be changed.' -ForegroundColor Gray
+    Write-Host 'A backup of each replaced core file will be stored in the Backups folder.' -ForegroundColor Gray
+    Write-Host ''
+    $confirm = Read-Host 'Type UPDATE to download and install this release, or press Enter to cancel'
+    if ($confirm -cne 'UPDATE') {
+        Write-Log "UPDATE CANCELLED: v$releaseVersionText"
+        Write-Host 'Update cancelled. No files were changed.' -ForegroundColor Yellow
+        Pause-Return
+        return
+    }
+
+    $tempRoot = Join-Path $env:TEMP ('WinToolKit_Update_' + [Guid]::NewGuid().ToString('N'))
+    $downloadPath = Join-Path $tempRoot 'release.zip'
+    $extractPath = Join-Path $tempRoot 'extracted'
+    try {
+        New-Item -ItemType Directory -Path $tempRoot -Force -ErrorAction Stop | Out-Null
+
+        $asset = @($release.assets | Where-Object { ([string]$_.name) -match '^WinToolKit.*\.zip$' } | Select-Object -First 1)
+        if ($asset.Count -gt 0) {
+            $downloadUrl = [string]$asset[0].browser_download_url
+        } else {
+            # If a release has no packaged ZIP, fall back to GitHub's source archive for this release tag.
+            $downloadUrl = [string]$release.zipball_url
+        }
+        if ($downloadUrl -notmatch '^https://(?:github\.com|api\.github\.com)/') {
+            throw 'GitHub did not provide an expected HTTPS download link.'
+        }
+
+        Write-Host 'Downloading release files...' -ForegroundColor Gray
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath `
+            -Headers @{ 'User-Agent' = 'WinToolKit' } -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
+        Expand-Archive -LiteralPath $downloadPath -DestinationPath $extractPath -Force -ErrorAction Stop
+
+        $sourceScript = Get-ChildItem -LiteralPath $extractPath -Filter 'WinToolKit.ps1' -File -Recurse -ErrorAction Stop | Select-Object -First 1
+        if ($null -eq $sourceScript) {
+            throw 'The downloaded release did not contain WinToolKit.ps1. No files were changed.'
+        }
+        $sourceText = Get-Content -LiteralPath $sourceScript.FullName -Raw -ErrorAction Stop
+        $versionMatch = [regex]::Match($sourceText, "(?m)^`$script:ToolVersion\s*=\s*'([^']+)'")
+        if (-not $versionMatch.Success) {
+            throw 'The downloaded script does not declare a recognizable WinToolKit version. No files were changed.'
+        }
+        $archiveVersion = ConvertTo-WinToolKitVersion -VersionText $versionMatch.Groups[1].Value
+        if ($null -eq $archiveVersion -or $archiveVersion -ne $latestVersion) {
+            throw "Release tag v$releaseVersionText does not match the script version in the downloaded files. No files were changed."
+        }
+
+        # Only update core toolkit files. Apps, Logs, and any unrelated user files are deliberately excluded.
+        $updatePlan = @()
+        foreach ($fileName in @('WinToolKit.ps1', 'RunAsAdmin.bat', 'README.md')) {
+            $sourceFile = if ($fileName -eq 'WinToolKit.ps1') {
+                $sourceScript
+            } else {
+                Get-ChildItem -LiteralPath $extractPath -Filter $fileName -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if ($null -eq $sourceFile) { continue }
+
+            if ($fileName -eq 'WinToolKit.ps1') {
+                $destination = $script:ScriptPath
+            } else {
+                $destination = Join-Path $script:ToolRoot $fileName
+            }
+            $updatePlan += [pscustomobject]@{
+                Name = $fileName
+                Source = $sourceFile.FullName
+                Destination = $destination
+                Exists = (Test-Path -LiteralPath $destination -PathType Leaf)
+                Backup = $null
+            }
+        }
+        if ($updatePlan.Count -eq 0) { throw 'No supported toolkit files were found in the downloaded archive.' }
+
+        $backupFolder = Join-Path $script:ToolRoot 'Backups'
+        New-Item -ItemType Directory -Path $backupFolder -Force -ErrorAction Stop | Out-Null
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        foreach ($item in $updatePlan) {
+            if ($item.Exists) {
+                $safeName = $item.Name -replace '[^A-Za-z0-9._-]', '_'
+                $item.Backup = Join-Path $backupFolder (('{0}_v{1}_{2}.bak' -f $safeName, $script:ToolVersion, $stamp))
+                Copy-Item -LiteralPath $item.Destination -Destination $item.Backup -Force -ErrorAction Stop
+            }
+        }
+
+        $copiedItems = @()
+        try {
+            foreach ($item in $updatePlan) {
+                Copy-Item -LiteralPath $item.Source -Destination $item.Destination -Force -ErrorAction Stop
+                $copiedItems += $item
+            }
+        } catch {
+            # If any copy fails, restore files already replaced during this update attempt.
+            foreach ($item in $copiedItems) {
+                try {
+                    if ($item.Exists -and $item.Backup -and (Test-Path -LiteralPath $item.Backup)) {
+                        Copy-Item -LiteralPath $item.Backup -Destination $item.Destination -Force -ErrorAction Stop
+                    } elseif (-not $item.Exists -and (Test-Path -LiteralPath $item.Destination)) {
+                        Remove-Item -LiteralPath $item.Destination -Force -ErrorAction SilentlyContinue
+                    }
+                } catch {}
+            }
+            throw
+        }
+
+        Write-Log "UPDATE INSTALLED: v$releaseVersionText; updated=$($updatePlan.Name -join ', '); user Apps and Logs preserved"
+        Write-Host ''
+        Write-Host "WinToolKit v$releaseVersionText was installed successfully." -ForegroundColor Green
+        Write-Host "Backup location: $backupFolder" -ForegroundColor Gray
+        Write-Host 'Your Apps and Logs folders were left untouched.' -ForegroundColor Green
+        Write-Host 'Restart WinToolKit to load the updated code.' -ForegroundColor Yellow
+        Write-Host ''
+        $restart = Read-Host 'Type R to restart WinToolKit now, or press Enter to return'
+        if ($restart -match '^[rR]$') {
+            try {
+                Start-Process -FilePath 'powershell.exe' `
+                    -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $script:ScriptPath) `
+                    -WorkingDirectory $script:ToolRoot -ErrorAction Stop
+                exit
+            } catch {
+                Write-Host "Automatic restart failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host 'Close WinToolKit and start it again manually.' -ForegroundColor Yellow
+                Pause-Return
+            }
+        }
+    } catch {
+        Write-Host ''
+        Write-Host "Update failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'Your Apps and Logs folders were not changed.' -ForegroundColor Gray
+        Write-Log "UPDATE FAILED for v$releaseVersionText : $($_.Exception.Message)"
+        Pause-Return
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Show-MainMenu {
     Show-Banner
     Write-Host 'MAIN MENU' -ForegroundColor Green
@@ -1455,8 +1759,9 @@ function Show-MainMenu {
     Write-Host '[2] Massgrave - Activate Windows & Office' -ForegroundColor Cyan
     Write-Host '[3] Remove Apps (Standard MS Apps)' -ForegroundColor Cyan
     Write-Host '[4] System Info' -ForegroundColor Cyan
-    Write-Host '[5] Log' -ForegroundColor Cyan
-    Write-Host "[6] About WinToolKit v$script:ToolVersion" -ForegroundColor Cyan
+    Write-Host '[5] Log Info' -ForegroundColor Cyan
+    Write-Host '[6] Update WinToolKit' -ForegroundColor Cyan
+    Write-Host "[7] About WinToolKit v$script:ToolVersion" -ForegroundColor Cyan
     Write-Host '[Q] Quit' -ForegroundColor Red
     Write-Host '----------------------------------------------' -ForegroundColor DarkCyan
     Write-Host ''
@@ -1475,14 +1780,19 @@ Write-Log "WinToolKit v$script:ToolVersion started. Root=$script:ToolRoot"
 
 while ($true) {
     Show-MainMenu
-    $choice = (Read-Host 'Choose (1-6, Q)').Trim()
+    $keyInfo = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    $choice = [string]$keyInfo.Character
+    if (-not [string]::IsNullOrWhiteSpace($choice)) {
+        Write-Log "Main menu selection: $($choice.ToUpperInvariant())"
+    }
     switch ($choice.ToUpperInvariant()) {
         '1' { Install-CustomApp }
         '2' { Invoke-Massgrave }
         '3' { Show-RemovalMenu }
         '4' { Show-SystemInformation }
         '5' { Show-Log }
-        '6' { Show-About }
+        '6' { Invoke-WinToolKitUpdate }
+        '7' { Show-About }
         'Q' {
             Write-Log 'WinToolKit closed by user.'
             Clear-Host
@@ -1490,7 +1800,7 @@ while ($true) {
             Write-Host ''
             break
         }
-        default { Write-Host 'Invalid selection. Please choose 1-6 or Q.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+        default { Write-Host 'Invalid selection. Please choose 1-7, or Q.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
     }
     if ($choice.ToUpperInvariant() -eq 'Q') { break }
 }
