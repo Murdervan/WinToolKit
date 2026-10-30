@@ -27,6 +27,12 @@ No complicated interface. No unnecessary menus. Just practical tools in one plac
 
 ---
 
+### Quick Start — WinToolKit CMD Version
+
+Prefer an easier way to get started? Use **[WinToolKit CMD Version](https://github.com/Murdervan/WinToolKit-cmd-version)** to download the latest release and launch WinToolKit with administrator privileges.
+
+---
+
 ## 📑 Table of Contents
 
 - [Features](#-features)
