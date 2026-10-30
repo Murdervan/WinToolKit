@@ -237,7 +237,7 @@ Current folder: ...\WinToolKit\Apps
 [ 3] ChromeSetup.exe  (.EXE)
 [ 4] VLC-Installer.exe (.EXE)
 
-[O] Open current folder in Explorer   [U] Up   [R] Refresh   [B] Back
+[O] Open current folder in Explorer    [R] Refresh   [B] Back
 
 Choose a number or action:
 ```
