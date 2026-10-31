@@ -1,20 +1,37 @@
 ﻿# WinToolKit by Murdervan
-# Version: 1.0.1
+# Version: 1.1.0
 # Windows 10 / Windows 11
 # PowerShell 5.1 compatible
 
 $ErrorActionPreference = 'Continue'
-$script:ToolVersion = '1.0.1'
-$script:ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:ToolVersion = '1.1.0'
+
+# Detect the script location. When launched from WORKFLOW, the parent folder
+# remains the toolkit root so Apps, Logs, Backups and README stay in place.
+$script:ScriptPath = $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) {
+    $script:ScriptPath = $PSCommandPath
+}
+if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) {
+    $script:ToolScriptDirectory = (Get-Location).Path
+} else {
+    $script:ToolScriptDirectory = Split-Path -Parent $script:ScriptPath
+}
+
+if ((Split-Path -Leaf $script:ToolScriptDirectory) -ieq 'WORKFLOW') {
+    $script:ToolRoot = Split-Path -Parent $script:ToolScriptDirectory
+} else {
+    $script:ToolRoot = $script:ToolScriptDirectory
+}
 if ([string]::IsNullOrWhiteSpace($script:ToolRoot)) {
     $script:ToolRoot = (Get-Location).Path
 }
+
 $script:AppsPath = Join-Path $script:ToolRoot 'Apps'
 $script:LogsPath = Join-Path $script:ToolRoot 'Logs'
 $script:LogFile = $null                 # WinToolKit-wide activity log
 $script:RemovalLogFile = $null          # Separate Remove Apps log
 $script:LogContext = $null
-$script:ScriptPath = $MyInvocation.MyCommand.Path
 $script:IssuesUrl = 'https://github.com/murdervan/WinToolKit/issues'
 $script:GitHubRepoUrl = 'https://github.com/murdervan/WinToolKit'
 $script:GitHubLatestReleaseApi = 'https://api.github.com/repos/murdervan/WinToolKit/releases/latest'
@@ -97,6 +114,18 @@ namespace WinToolKit {
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
         [DllImport("user32.dll")]
         public static extern int GetSystemMetrics(int nIndex);
     }
@@ -133,9 +162,16 @@ namespace WinToolKit {
             if ($windowWidth -gt 0 -and $windowHeight -gt 0 -and $screenWidth -ge $windowWidth -and $screenHeight -ge $windowHeight) {
                 $left = [int][Math]::Max(0, [Math]::Floor(($screenWidth - $windowWidth) / 2.0))
                 $top = [int][Math]::Max(0, [Math]::Floor(($screenHeight - $windowHeight) / 2.0))
-                $flags = [uint32](0x0001 -bor 0x0004 -bor 0x0010) # NOSIZE | NOZORDER | NOACTIVATE
+                # Move the console to the top and allow it to become active.
+                # NOSIZE keeps the dimensions established above.
+                $flags = [uint32]0x0001
                 [void][WinToolKit.NativeConsole]::SetWindowPos($consoleWindow, [IntPtr]::Zero, $left, $top, 0, 0, $flags)
             }
+
+            # Restore and activate the console so the main menu is ready for keyboard input.
+            [void][WinToolKit.NativeConsole]::ShowWindow($consoleWindow, 9) # SW_RESTORE
+            [void][WinToolKit.NativeConsole]::BringWindowToTop($consoleWindow)
+            [void][WinToolKit.NativeConsole]::SetForegroundWindow($consoleWindow)
         }
     }
 } catch {
@@ -1268,10 +1304,310 @@ function Get-CustomInstallerList {
         New-Item -ItemType Directory -Path $script:AppsPath -Force | Out-Null
     }
     if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { $Folder = $script:AppsPath }
-    # Show all files so BAT, CMD, PowerShell scripts, and other file types can be opened too.
+    # Show all local files so BAT, CMD, PowerShell scripts, and other file types can be opened too.
     $dirs = @(Get-ChildItem -LiteralPath $Folder -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
     $files = @(Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue | Sort-Object Name)
     return @{ Folders = $dirs; Files = $files; Current = $Folder }
+}
+
+function Get-GitHubAppsDirectory {
+    param([string]$RelativeFolder = '')
+
+    # Use the GitHub Contents API for the current directory. This returns every
+    # immediate file and subfolder, and lets the browser navigate each level
+    # independently instead of relying on path-prefix parsing of one large tree.
+    $folder = ([string]$RelativeFolder).Replace('\', '/').Trim('/')
+    if ($folder -match '(^|/)(\.|\.\.)(/|$)' -or
+        $folder.StartsWith('/') -or
+        $folder.Contains(':')) {
+        throw 'Invalid GitHub Apps folder path.'
+    }
+
+    if ($null -eq $script:GitHubAppsDirectoryCache) {
+        $script:GitHubAppsDirectoryCache = @{}
+    }
+
+    $cacheKey = $folder.ToLowerInvariant()
+    if ($script:GitHubAppsDirectoryCache.ContainsKey($cacheKey)) {
+        return $script:GitHubAppsDirectoryCache[$cacheKey]
+    }
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor
+            [Net.SecurityProtocolType]::Tls12
+    } catch {}
+
+    $headers = @{
+        'Accept' = 'application/vnd.github+json'
+        'User-Agent' = 'WinToolKit'
+    }
+
+    $pathParts = @('Apps')
+    if (-not [string]::IsNullOrWhiteSpace($folder)) {
+        $pathParts += @($folder -split '/')
+    }
+
+    $encodedPath = @($pathParts | ForEach-Object {
+        [Uri]::EscapeDataString([string]$_)
+    }) -join '/'
+
+    $apiUrl = 'https://api.github.com/repos/Murdervan/WinToolKit/contents/' + $encodedPath + '?ref=main'
+
+    try {
+        $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers `
+            -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    } catch {
+        throw "GitHub could not list Apps/$folder : $($_.Exception.Message)"
+    }
+
+    $entries = @()
+    foreach ($item in @($response)) {
+        if ($null -eq $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) {
+            continue
+        }
+
+        $itemType = [string]$item.type
+        if ($itemType -ne 'dir' -and $itemType -ne 'file') {
+            continue
+        }
+
+        $name = [string]$item.name
+        if ($name -eq '.' -or $name -eq '..' -or $name.Contains('/') -or $name.Contains('\')) {
+            continue
+        }
+
+        $relativePath = if ([string]::IsNullOrWhiteSpace($folder)) {
+            $name
+        } else {
+            $folder.TrimEnd('/') + '/' + $name
+        }
+
+        if ($itemType -eq 'dir') {
+            $entries += [pscustomobject]@{
+                type = 'dir'
+                name = $name
+                size = $null
+                download_url = $null
+                sha = [string]$item.sha
+                relative_path = $relativePath
+            }
+            continue
+        }
+
+        $downloadUrl = [string]$item.download_url
+        if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
+            $rawPathParts = @('Apps') + @($relativePath -split '/')
+            $encodedRawPath = @($rawPathParts | ForEach-Object {
+                [Uri]::EscapeDataString([string]$_)
+            }) -join '/'
+            $downloadUrl = 'https://raw.githubusercontent.com/Murdervan/WinToolKit/main/' + $encodedRawPath
+        }
+
+        $entries += [pscustomobject]@{
+            type = 'file'
+            name = $name
+            size = $item.size
+            download_url = $downloadUrl
+            sha = [string]$item.sha
+            relative_path = $relativePath
+        }
+    }
+
+    $entries = @($entries | Sort-Object -Property @(
+        @{ Expression = { if ($_.type -eq 'dir') { 0 } else { 1 } } },
+        @{ Expression = { [string]$_.name } }
+    ))
+
+    $script:GitHubAppsDirectoryCache[$cacheKey] = @($entries)
+    return $entries
+}
+
+function Show-GitHubAppsBrowser {
+    $relativeFolder = ''
+
+    while ($true) {
+        try {
+            $entries = @(Get-GitHubAppsDirectory -RelativeFolder $relativeFolder)
+        } catch {
+            Clear-Host
+            Write-Host 'GITHUB APPS' -ForegroundColor Cyan
+            Write-Host ''
+            if ([string]::IsNullOrWhiteSpace($relativeFolder)) {
+                Write-Host 'Repository folder: Apps' -ForegroundColor DarkGray
+            } else {
+                Write-Host "Repository folder: Apps/$relativeFolder" -ForegroundColor DarkGray
+            }
+            Write-Host "Could not retrieve this GitHub folder: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host '[R] Retry   [B] Back' -ForegroundColor Yellow
+            $errorChoice = (Read-Host 'Choose an action').Trim()
+
+            if ($errorChoice -match '^[rR]$') {
+                $script:GitHubAppsDirectoryCache = @{}
+                continue
+            }
+            if ($errorChoice -match '^[bB]$') {
+                if ([string]::IsNullOrWhiteSpace($relativeFolder)) {
+                    return $null
+                }
+                $lastSlash = $relativeFolder.LastIndexOf('/')
+                if ($lastSlash -ge 0) {
+                    $relativeFolder = $relativeFolder.Substring(0, $lastSlash)
+                } else {
+                    $relativeFolder = ''
+                }
+                continue
+            }
+            continue
+        }
+
+        Clear-Host
+        Write-Host 'GITHUB APPS' -ForegroundColor Cyan
+        if ([string]::IsNullOrWhiteSpace($relativeFolder)) {
+            Write-Host 'Repository: Murdervan/WinToolKit / Apps' -ForegroundColor DarkGray
+        } else {
+            Write-Host "Repository folder: Apps/$relativeFolder" -ForegroundColor DarkGray
+        }
+        Write-Host 'Folders can be opened to browse their contents.' -ForegroundColor Gray
+        Write-Host 'Only the file you select and confirm will be downloaded.' -ForegroundColor Gray
+        Write-Host ''
+
+        $indexMap = @{}
+        $n = 1
+        foreach ($entry in $entries) {
+            if ($entry.type -eq 'dir') {
+                Write-Host ('[{0,2}] [FOLDER] {1}' -f $n, $entry.name) -ForegroundColor Yellow
+            } else {
+                $extension = [IO.Path]::GetExtension([string]$entry.name).ToUpperInvariant()
+                $sizeText = if ($null -ne $entry.size) {
+                    '{0:N1} MB' -f ([double]$entry.size / 1MB)
+                } else {
+                    'size unknown'
+                }
+                Write-Host ('[{0,2}] {1}  ({2}, {3})' -f $n, $entry.name, $extension, $sizeText) -ForegroundColor Cyan
+            }
+            $indexMap[$n] = $entry
+            $n++
+        }
+
+        if ($n -eq 1) {
+            Write-Host 'No files or subfolders were found in this GitHub folder.' -ForegroundColor DarkGray
+        }
+
+        Write-Host ''
+        Write-Host '[R] Refresh   ' -NoNewline -ForegroundColor Green
+        if ([string]::IsNullOrWhiteSpace($relativeFolder)) {
+            Write-Host '[B] Back to Install Custom Apps' -ForegroundColor Yellow
+        } else {
+            Write-Host '[B] Back one folder' -ForegroundColor Yellow
+        }
+
+        $selection = (Read-Host 'Choose a number or action').Trim()
+
+        if ($selection -match '^[rR]$') {
+            $script:GitHubAppsDirectoryCache = @{}
+            continue
+        }
+
+        if ($selection -match '^[bB]$') {
+            if ([string]::IsNullOrWhiteSpace($relativeFolder)) {
+                return $null
+            }
+
+            # Move up exactly one GitHub folder level. Avoid Split-Path here:
+            # Relative GitHub paths are not filesystem paths.
+            $lastSlash = $relativeFolder.LastIndexOf('/')
+            if ($lastSlash -ge 0) {
+                $relativeFolder = $relativeFolder.Substring(0, $lastSlash)
+            } else {
+                $relativeFolder = ''
+            }
+            continue
+        }
+
+        $number = 0
+        if (-not [int]::TryParse($selection, [ref]$number) -or
+            -not $indexMap.ContainsKey($number)) {
+            Write-Host 'Invalid selection.' -ForegroundColor Yellow
+            Start-Sleep -Milliseconds 800
+            continue
+        }
+
+        $selectedEntry = $indexMap[$number]
+        if ($selectedEntry.type -eq 'dir') {
+            $relativeFolder = [string]$selectedEntry.relative_path
+            continue
+        }
+
+        return [pscustomobject]@{
+            Entry = $selectedEntry
+            RelativePath = [string]$selectedEntry.relative_path
+        }
+    }
+}
+
+function Get-GitHubAppFile {
+    param(
+        [Parameter(Mandatory=$true)]$RemoteSelection
+    )
+
+    $relativePath = [string]$RemoteSelection.RelativePath
+    $pathParts = @($relativePath -split '/')
+    $invalidChars = [IO.Path]::GetInvalidFileNameChars()
+    foreach ($part in $pathParts) {
+        if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..' -or $part.IndexOfAny($invalidChars) -ge 0) {
+            throw 'GitHub returned an invalid app file path.'
+        }
+    }
+
+    $cacheRoot = Join-Path $script:AppsPath 'GitHub'
+    New-Item -ItemType Directory -Path $cacheRoot -Force -ErrorAction Stop | Out-Null
+    $cacheRootFull = [IO.Path]::GetFullPath($cacheRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $localRelativePath = $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+    $destination = [IO.Path]::GetFullPath((Join-Path $cacheRoot $localRelativePath))
+    if (-not $destination.StartsWith($cacheRootFull, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The selected GitHub app path is outside the local Apps cache.'
+    }
+
+    $remoteUrl = [string]$RemoteSelection.Entry.download_url
+    if ([string]::IsNullOrWhiteSpace($remoteUrl)) {
+        $encodedPath = @((@('Apps') + $pathParts) | ForEach-Object { [Uri]::EscapeDataString([string]$_) }) -join '/'
+        $remoteUrl = 'https://raw.githubusercontent.com/Murdervan/WinToolKit/main/' + $encodedPath
+    }
+
+    $downloadUri = $null
+    if (-not [Uri]::TryCreate($remoteUrl, [UriKind]::Absolute, [ref]$downloadUri) -or
+        $downloadUri.Scheme -ne 'https' -or
+        $downloadUri.Host -ne 'raw.githubusercontent.com') {
+        throw 'GitHub returned an unexpected app download URL.'
+    }
+
+    $destinationFolder = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Path $destinationFolder -Force -ErrorAction Stop | Out-Null
+    $temporaryFile = $destination + '.' + [Guid]::NewGuid().ToString('N') + '.download'
+
+    try {
+        Write-Host ''
+        Write-Host "Downloading $relativePath ..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $remoteUrl -OutFile $temporaryFile `
+            -Headers @{ 'User-Agent' = 'WinToolKit' } -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop | Out-Null
+
+        if (($null -ne $RemoteSelection.Entry.size) -and
+            ((Get-Item -LiteralPath $temporaryFile).Length -ne [long]$RemoteSelection.Entry.size)) {
+            throw 'The downloaded file size did not match the GitHub file listing.'
+        }
+
+        Move-Item -LiteralPath $temporaryFile -Destination $destination -Force -ErrorAction Stop
+        Write-Log "Downloaded GitHub app after user selection: $relativePath"
+        Write-Host 'Download completed.' -ForegroundColor Green
+    } finally {
+        if (Test-Path -LiteralPath $temporaryFile) {
+            Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    return Get-Item -LiteralPath $destination -ErrorAction Stop
 }
 
 function Install-CustomApp {
@@ -1280,10 +1616,11 @@ function Install-CustomApp {
         $listing = Get-CustomInstallerList -Folder $currentFolder
         Clear-Host
         Write-Host 'INSTALL CUSTOM APPS' -ForegroundColor Cyan
-        Write-Host 'Browse folders, open them in Explorer, or choose a file to run/open.' -ForegroundColor Gray
+        Write-Host 'Browse local folders, or browse GitHub apps and download only what you select.' -ForegroundColor Gray
         Write-Host "Current folder: $currentFolder" -ForegroundColor DarkGray
         Write-Host 'Installers: EXE/MSI/MSIX/APPX | Scripts: BAT/CMD/PS1/VBS/JS | Other files open with their default Windows app' -ForegroundColor DarkGray
         Write-Host ''
+
         $indexMap = @{}
         $n = 1
         foreach ($dir in $listing.Folders) {
@@ -1296,17 +1633,32 @@ function Install-CustomApp {
             $indexMap[$n] = @{ Type='File'; Item=$file }
             $n++
         }
-        if ($n -eq 1) { Write-Host 'No folders or files in this location.' -ForegroundColor DarkGray }
+        if ($n -eq 1) { Write-Host 'No local folders or files in this location.' -ForegroundColor DarkGray }
         Write-Host ''
         Write-Host -NoNewline '[O] Open current folder in Explorer   [R] Refresh   ' -ForegroundColor Green
+        if ($currentFolder -eq $script:AppsPath) {
+            Write-Host '[G] Browse GitHub Apps   ' -NoNewline -ForegroundColor Cyan
+        }
         Write-Host '[B] Back' -ForegroundColor Yellow
+
         $sel = (Read-Host 'Choose a number or action').Trim()
         if ($sel -match '^[bB]$') {
-            # In folder browsing, Back means parent folder; at Apps root it returns to main menu.
-            if ($currentFolder -ne $script:AppsPath) {
-                $parent = Split-Path -Parent $currentFolder
-                if ($parent -and ($parent -eq $script:AppsPath -or $parent.StartsWith($script:AppsPath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) {
-                    $currentFolder = $parent
+            # Back moves up exactly one local Apps folder level.
+            # At the Apps root it returns to the WinToolKit main menu.
+            $appsRootFull = [IO.Path]::GetFullPath($script:AppsPath).TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))
+            $currentFull = [IO.Path]::GetFullPath($currentFolder).TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))
+
+            if (-not $currentFull.Equals($appsRootFull, [StringComparison]::OrdinalIgnoreCase)) {
+                $parentInfo = [IO.Directory]::GetParent($currentFull)
+                if ($null -ne $parentInfo) {
+                    $parentFull = $parentInfo.FullName.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))
+                    $appsPrefix = $appsRootFull + [IO.Path]::DirectorySeparatorChar
+                    if ($parentFull.Equals($appsRootFull, [StringComparison]::OrdinalIgnoreCase) -or
+                        $parentFull.StartsWith($appsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        $currentFolder = $parentFull
+                    } else {
+                        $currentFolder = $script:AppsPath
+                    }
                 } else {
                     $currentFolder = $script:AppsPath
                 }
@@ -1320,70 +1672,109 @@ function Install-CustomApp {
             catch { Write-Host "Could not open folder: $($_.Exception.Message)" -ForegroundColor Red; Pause-Return }
             continue
         }
-        $number = 0
-        if (-not [int]::TryParse($sel, [ref]$number) -or -not $indexMap.ContainsKey($number)) {
-            Write-Host 'Invalid selection.' -ForegroundColor Yellow; Start-Sleep -Milliseconds 800; continue
-        }
-        $entry = $indexMap[$number]
-        if ($entry.Type -eq 'Folder') { $currentFolder = $entry.Item.FullName; continue }
-        $installer = $entry.Item
-        $extension = $installer.Extension.ToLowerInvariant()
-        Write-Host ''
-        Write-Host "Selected: $($installer.Name)" -ForegroundColor Cyan
-        Write-Host "Location: $($installer.FullName)" -ForegroundColor Gray
-        Write-Host 'Only run installers you trust; they may make system-wide changes.' -ForegroundColor Yellow
-        $confirm = Read-Host 'Type RUN to start, or press Enter to cancel'
-        if ($confirm -ceq 'RUN') {
-            try {
-                Write-Log "Started custom installer: $($installer.FullName)"
-                switch ($extension) {
-                    '.exe' {
-                        $proc = Start-Process -FilePath $installer.FullName -Wait -PassThru -ErrorAction Stop
-                        Write-Host "Program finished with exit code $($proc.ExitCode)." -ForegroundColor Green
-                        Write-Log "Program exited with code $($proc.ExitCode): $($installer.FullName)"
-                    }
-                    '.msi' {
-                        $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList @('/i', ('"{0}"' -f $installer.FullName)) -Wait -PassThru -ErrorAction Stop
-                        Write-Host "Installer finished with exit code $($proc.ExitCode)." -ForegroundColor Green
-                        Write-Log "Installer exited with code $($proc.ExitCode): $($installer.FullName)"
-                    }
-                    { $_ -in '.msix', '.appx', '.msixbundle', '.appxbundle' } {
-                        Add-AppxPackage -Path $installer.FullName -ErrorAction Stop
-                        Write-Host 'Package installation command completed.' -ForegroundColor Green
-                        Write-Log "Package installation completed: $($installer.FullName)"
-                    }
-                    { $_ -in '.bat', '.cmd' } {
-                        # Run command scripts in a separate CMD window and leave it open for output.
-                        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList ('/k "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
-                        Write-Host "Command script window closed (exit code $($proc.ExitCode))." -ForegroundColor Green
-                        Write-Log "Started command script: $($installer.FullName)"
-                    }
-                    '.ps1' {
-                        # Open PowerShell scripts in a separate, visible PowerShell window.
-                        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
-                        Write-Host 'PowerShell script window closed.' -ForegroundColor Green
-                        Write-Log "Started PowerShell script: $($installer.FullName)"
-                    }
-                    '.vbs' {
-                        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
-                        Write-Host 'VBScript opened.' -ForegroundColor Green
-                        Write-Log "Opened VBScript: $($installer.FullName)"
-                    }
-                    '.js' {
-                        Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
-                        Write-Host 'JavaScript file opened.' -ForegroundColor Green
-                        Write-Log "Opened JavaScript file: $($installer.FullName)"
-                    }
-                    default {
-                        # Documents, shortcuts, and any other file type use their Windows default app.
-                        Start-Process -FilePath $installer.FullName -ErrorAction Stop
-                        Write-Host 'Opened file with its default Windows application.' -ForegroundColor Green
-                        Write-Log "Opened file with default application: $($installer.FullName)"
-                    }
+
+        $installer = $null
+        if ($sel -match '^[gG]$' -and $currentFolder -eq $script:AppsPath) {
+            $remoteSelection = Show-GitHubAppsBrowser
+            if ($null -eq $remoteSelection) { continue }
+            $remoteName = [string]$remoteSelection.Entry.name
+            Write-Host ''
+            Write-Host "Selected GitHub app: $remoteName" -ForegroundColor Cyan
+            Write-Host "Repository path: Apps/$($remoteSelection.RelativePath)" -ForegroundColor Gray
+            Write-Host 'Only this selected file will be downloaded. Other GitHub apps will not be downloaded.' -ForegroundColor Yellow
+            $confirm = Read-Host 'Type RUN to download and start, or press Enter to cancel'
+            if ($confirm -ceq 'RUN') {
+                try {
+                    $installer = Get-GitHubAppFile -RemoteSelection $remoteSelection
+                } catch {
+                    Write-Host "Could not download selected app: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Log "ERROR downloading GitHub app $($remoteSelection.RelativePath): $($_.Exception.Message)"
+                    Pause-Return
+                    continue
                 }
-            } catch { Write-Host "Could not install/start installer: $($_.Exception.Message)" -ForegroundColor Red; Write-Log "ERROR installing $($installer.FullName): $($_.Exception.Message)" }
-            Pause-Return
-        } else { Write-Host 'Installer start cancelled.' -ForegroundColor DarkGray; Start-Sleep -Milliseconds 500 }
+            } else {
+                Write-Host 'Download cancelled. No app file was downloaded.' -ForegroundColor DarkGray
+                Start-Sleep -Milliseconds 700
+                continue
+            }
+        } else {
+            $number = 0
+            if (-not [int]::TryParse($sel, [ref]$number) -or -not $indexMap.ContainsKey($number)) {
+                Write-Host 'Invalid selection.' -ForegroundColor Yellow
+                Start-Sleep -Milliseconds 800
+                continue
+            }
+            $entry = $indexMap[$number]
+            if ($entry.Type -eq 'Folder') { $currentFolder = $entry.Item.FullName; continue }
+            $installer = $entry.Item
+
+            Write-Host ''
+            Write-Host "Selected: $($installer.Name)" -ForegroundColor Cyan
+            Write-Host "Location: $($installer.FullName)" -ForegroundColor Gray
+            Write-Host 'Only run installers you trust; they may make system-wide changes.' -ForegroundColor Yellow
+            $confirm = Read-Host 'Type RUN to start, or press Enter to cancel'
+            if ($confirm -cne 'RUN') {
+                Write-Host 'Installer start cancelled.' -ForegroundColor DarkGray
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+        }
+
+        if ($null -eq $installer) { continue }
+        $extension = $installer.Extension.ToLowerInvariant()
+
+        try {
+            Write-Log "Started custom installer: $($installer.FullName)"
+            switch ($extension) {
+                '.exe' {
+                    $proc = Start-Process -FilePath $installer.FullName -Wait -PassThru -ErrorAction Stop
+                    Write-Host "Program finished with exit code $($proc.ExitCode)." -ForegroundColor Green
+                    Write-Log "Program exited with code $($proc.ExitCode): $($installer.FullName)"
+                }
+                '.msi' {
+                    $proc = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList @('/i', ('"{0}"' -f $installer.FullName)) -Wait -PassThru -ErrorAction Stop
+                    Write-Host "Installer finished with exit code $($proc.ExitCode)." -ForegroundColor Green
+                    Write-Log "Installer exited with code $($proc.ExitCode): $($installer.FullName)"
+                }
+                { $_ -in '.msix', '.appx', '.msixbundle', '.appxbundle' } {
+                    Add-AppxPackage -Path $installer.FullName -ErrorAction Stop
+                    Write-Host 'Package installation command completed.' -ForegroundColor Green
+                    Write-Log "Package installation completed: $($installer.FullName)"
+                }
+                { $_ -in '.bat', '.cmd' } {
+                    # Run command scripts in a separate CMD window and leave it open for output.
+                    $proc = Start-Process -FilePath $env:ComSpec -ArgumentList ('/k "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
+                    Write-Host "Command script window closed (exit code $($proc.ExitCode))." -ForegroundColor Green
+                    Write-Log "Started command script: $($installer.FullName)"
+                }
+                '.ps1' {
+                    # Open PowerShell scripts in a separate, visible PowerShell window.
+                    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "{0}"' -f $installer.FullName) -Wait -PassThru -ErrorAction Stop
+                    Write-Host 'PowerShell script window closed.' -ForegroundColor Green
+                    Write-Log "Started PowerShell script: $($installer.FullName)"
+                }
+                '.vbs' {
+                    Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
+                    Write-Host 'VBScript opened.' -ForegroundColor Green
+                    Write-Log "Opened VBScript: $($installer.FullName)"
+                }
+                '.js' {
+                    Start-Process -FilePath 'wscript.exe' -ArgumentList ('"{0}"' -f $installer.FullName) -ErrorAction Stop
+                    Write-Host 'JavaScript file opened.' -ForegroundColor Green
+                    Write-Log "Opened JavaScript file: $($installer.FullName)"
+                }
+                default {
+                    # Documents, shortcuts, and any other file type use their Windows default app.
+                    Start-Process -FilePath $installer.FullName -ErrorAction Stop
+                    Write-Host 'Opened file with its default Windows application.' -ForegroundColor Green
+                    Write-Log "Opened file with default application: $($installer.FullName)"
+                }
+            }
+        } catch {
+            Write-Host "Could not install/start installer: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Log "ERROR installing $($installer.FullName): $($_.Exception.Message)"
+        }
+        Pause-Return
     }
 }
 
