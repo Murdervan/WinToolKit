@@ -1,2 +1,9 @@
-Put your apps installers in this folder and it will show up in Win Tool Kit.
-This is for offline installing of apps.
+# WinToolKit Apps
+
+**Offline apps**  
+Put your app installers in this folder. They will appear in WinToolKit under **Install Custom Apps** and can be used offline.
+
+**Online apps**  
+Browse **GitHub Apps** from the same menu. An app is downloaded only when you select it. Downloaded apps are saved in `Apps\GitHub` and remain available offline.
+
+Only use installers from sources you trust.
