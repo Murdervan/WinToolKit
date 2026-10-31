@@ -1,7 +1,7 @@
-﻿# WinToolKit by Murdervan
-# Version: 1.1.0
-# Windows 10 / Windows 11
-# PowerShell 5.1 compatible
+﻿#  WinToolKit by Murdervan
+#  Version: 1.1.0
+#  Windows 10 / Windows 11
+#  PowerShell 5.1 compatible
 
 $ErrorActionPreference = 'Continue'
 $script:ToolVersion = '1.1.0'
