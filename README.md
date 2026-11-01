@@ -22,7 +22,7 @@ No complicated interface. No unnecessary menus. Just practical tools in one plac
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square&logo=windows)
 ![Shell](https://img.shields.io/badge/Shell-PowerShell-5391FE?style=flat-square&logo=powershell)
-![Version](https://img.shields.io/badge/Version-v1.0.1-2ea44f?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v1.1.0-2ea44f?style=flat-square)
 ![USB Friendly](https://img.shields.io/badge/USB-Portable-8957e5?style=flat-square)
 
 ---
