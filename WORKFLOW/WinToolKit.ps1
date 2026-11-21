@@ -6,27 +6,48 @@
 $ErrorActionPreference = 'Continue'
 $script:ToolVersion = '1.2.0'
 
-# Detect the script location. When launched from WORKFLOW, the parent folder
-# remains the toolkit root so Apps, Logs, Backups and README stay in place.
-$script:ScriptPath = $MyInvocation.MyCommand.Path
-if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) {
-    $script:ScriptPath = $PSCommandPath
-}
-if ([string]::IsNullOrWhiteSpace($script:ScriptPath)) {
-    $script:ToolScriptDirectory = (Get-Location).Path
-} else {
-    $script:ToolScriptDirectory = Split-Path -Parent $script:ScriptPath
+# Resolve the toolkit root. The CMD launcher sets WINTOOLKIT_ROOT when the
+# current release is executed directly from GitHub in memory.
+$script:OriginalScriptPath = $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($script:OriginalScriptPath)) {
+    $script:OriginalScriptPath = $PSCommandPath
 }
 
-if ((Split-Path -Leaf $script:ToolScriptDirectory) -ieq 'WORKFLOW') {
-    $script:ToolRoot = Split-Path -Parent $script:ToolScriptDirectory
+$launcherRoot = [Environment]::GetEnvironmentVariable('WINTOOLKIT_ROOT', 'Process')
+if (-not [string]::IsNullOrWhiteSpace($launcherRoot) -and (Test-Path -LiteralPath $launcherRoot -PathType Container)) {
+    $script:ToolRoot = [IO.Path]::GetFullPath($launcherRoot)
 } else {
-    $script:ToolRoot = $script:ToolScriptDirectory
+    if ([string]::IsNullOrWhiteSpace($script:OriginalScriptPath)) {
+        $script:ToolScriptDirectory = (Get-Location).Path
+    } else {
+        $script:ToolScriptDirectory = Split-Path -Parent $script:OriginalScriptPath
+    }
+
+    if ((Split-Path -Leaf $script:ToolScriptDirectory) -ieq 'WORKFLOW') {
+        $script:ToolRoot = Split-Path -Parent $script:ToolScriptDirectory
+    } else {
+        $script:ToolRoot = $script:ToolScriptDirectory
+    }
 }
+
 if ([string]::IsNullOrWhiteSpace($script:ToolRoot)) {
     $script:ToolRoot = (Get-Location).Path
 }
 
+# In online CMD mode the script runs in memory, so use the WORKFLOW path as
+# the destination for explicit offline downloads and update operations.
+$launcherScriptTarget = [Environment]::GetEnvironmentVariable('WINTOOLKIT_SCRIPT_TARGET', 'Process')
+if (-not [string]::IsNullOrWhiteSpace($launcherScriptTarget)) {
+    $script:ScriptPath = [IO.Path]::GetFullPath($launcherScriptTarget)
+} elseif (-not [string]::IsNullOrWhiteSpace($script:OriginalScriptPath)) {
+    $script:ScriptPath = [IO.Path]::GetFullPath($script:OriginalScriptPath)
+} else {
+    $script:ScriptPath = Join-Path (Join-Path $script:ToolRoot 'WORKFLOW') 'WinToolKit.ps1'
+}
+
+$script:WorkflowPath = Join-Path $script:ToolRoot 'WORKFLOW'
+$script:OfflineScriptPath = Join-Path $script:WorkflowPath 'WinToolKit.ps1'
+$script:ReadmeUrl = 'https://github.com/Murdervan/WinToolKit-cmd-version/blob/main/README.md'
 $script:AppsPath = Join-Path $script:ToolRoot 'Apps'
 $script:LogsPath = Join-Path $script:ToolRoot 'Logs'
 $script:LogFile = $null                 # WinToolKit-wide activity log
@@ -278,7 +299,7 @@ $script:Categories = [ordered]@{
         @{N='Calculator'; P='Calculator'},
         @{N='Paint'; P='Paint'},
         @{N='Clock'; P='WindowsAlarms'},
-        @{N='Windows Store'; P='WindowsStore'},
+        @{N='Microsoft Store'; P='Microsoft.WindowsStore'},
         @{N='Store Core'; P='Store'},
         @{N='OneDrive'; P='OneDrive'},
         @{N='Quick Assist'; P='QuickAssist'}
@@ -517,11 +538,32 @@ function Remove-App {
     $removed = $false
     $failed = $false
     try {
-        $installed = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+        if ($Package -eq 'Microsoft.WindowsStore') {
+            # Query Microsoft Store explicitly. This avoids relying only on a broad
+            # all-packages wildcard and provides a current-user fallback if needed.
+            $installed = @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsStore' -ErrorAction Stop)
+            if ($installed.Count -eq 0) {
+                $installed = @(Get-AppxPackage -Name 'Microsoft.WindowsStore' -ErrorAction Stop)
+            }
+        } else {
+            $installed = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+        }
     } catch {
-        $installed = @()
-        $failed = $true
-        Write-Log "ERROR listing installed packages for $Name : $($_.Exception.Message)"
+        if ($Package -eq 'Microsoft.WindowsStore') {
+            try {
+                $installed = @(Get-AppxPackage -Name 'Microsoft.WindowsStore' -ErrorAction Stop)
+                if ($installed.Count -eq 0) { $failed = $true }
+                Write-Log 'Microsoft Store all-users query failed; current-user query was used.'
+            } catch {
+                $installed = @()
+                $failed = $true
+                Write-Log "ERROR querying Microsoft Store package: $($_.Exception.Message)"
+            }
+        } else {
+            $installed = @()
+            $failed = $true
+            Write-Log "ERROR listing installed packages for $Name : $($_.Exception.Message)"
+        }
     }
     try {
         $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)
@@ -546,9 +588,24 @@ function Remove-App {
             $removed = $true
             Write-Log "Removed installed package for $Name : $($app.PackageFullName)"
         } catch {
-            $failed = $true
-            Write-Log "ERROR removing installed package for $Name : $($_.Exception.Message)"
-            Write-Host "Could not remove $($app.PackageFullName): $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($Package -eq 'Microsoft.WindowsStore') {
+                # If the all-user request is rejected, still attempt removal for
+                # the account running WinToolKit and record the exact outcome.
+                try {
+                    Remove-AppxPackage -Package $app.PackageFullName -ErrorAction Stop
+                    $removed = $true
+                    Write-Log "Removed Microsoft Store for current user: $($app.PackageFullName)"
+                    Write-Host 'Microsoft Store was removed for the current user.' -ForegroundColor Green
+                } catch {
+                    $failed = $true
+                    Write-Log "ERROR removing Microsoft Store package $($app.PackageFullName): $($_.Exception.Message)"
+                    Write-Host "Could not remove $($app.PackageFullName): $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            } else {
+                $failed = $true
+                Write-Log "ERROR removing installed package for $Name : $($_.Exception.Message)"
+                Write-Host "Could not remove $($app.PackageFullName): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -776,7 +833,7 @@ function Get-AppScanPackagePatterns {
         'Calculator' = @('(?i)^Microsoft\.WindowsCalculator(?:_|$)')
         'Paint' = @('(?i)^Microsoft\.Paint(?:_|$)')
         'Clock' = @('(?i)^Microsoft\.WindowsAlarms(?:_|$)', '(?i)^Microsoft\.WindowsClock(?:_|$)')
-        'Windows Store' = @('(?i)^Microsoft\.WindowsStore(?:_|$)')
+        'Microsoft Store' = @('(?i)^Microsoft\.WindowsStore(?:_|$)')
         'Store Core' = @('(?i)^Microsoft\.StorePurchaseApp(?:_|$)')
         'OneDrive' = @('(?i)^Microsoft\.OneDrive(?:_|$)', '(?i)^Microsoft\.OneDriveSync(?:_|$)')
         'Quick Assist' = @('(?i)^MicrosoftCorporationII\.QuickAssist(?:_|$)', '(?i)^Microsoft\.QuickAssist(?:_|$)')
@@ -841,7 +898,7 @@ function Test-AppScanIdentifier {
         }
     }
 
-    # Avoid a generic "Store" substring hit: it would make Windows Store,
+    # Avoid a generic "Store" substring hit: it would make Microsoft Store,
     # Store Core and Store Ads all appear installed for the same unrelated match.
     if ([string]$App.P -eq 'Store' -or [string]$App.P -eq 'OfficeClickToRun') { return $false }
 
@@ -1778,6 +1835,147 @@ function Install-CustomApp {
     }
 }
 
+function ConvertTo-GpuMemoryBytes {
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) { return $null }
+
+    if ($Value -is [byte[]]) {
+        if ($Value.Length -ge 8) {
+            try { return [UInt64][BitConverter]::ToUInt64($Value, 0) } catch { return $null }
+        }
+        if ($Value.Length -ge 4) {
+            try { return [UInt64][BitConverter]::ToUInt32($Value, 0) } catch { return $null }
+        }
+        return $null
+    }
+
+    [UInt64]$parsed = 0
+    if ([UInt64]::TryParse([string]$Value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+    return $null
+}
+
+function Get-VideoMemoryBytes {
+    param([Parameter(Mandatory=$true)]$Gpu)
+
+    $gpuName = [string]$Gpu.Name
+    if ([string]::IsNullOrWhiteSpace($gpuName)) { $gpuName = [string]$Gpu.Caption }
+
+    # NVIDIA driver utility reports the actual dedicated VRAM in MiB and avoids
+    # the 32-bit Win32_VideoController.AdapterRAM limitation.
+    if ($gpuName -match '(?i)NVIDIA') {
+        $nvidiaSmi = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $nvidiaSmiPath = if ($nvidiaSmi) { [string]$nvidiaSmi.Definition } else { $null }
+        if ([string]::IsNullOrWhiteSpace($nvidiaSmiPath)) {
+            $nvidiaCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+                $nvidiaCandidates += (Join-Path $env:ProgramFiles 'NVIDIA Corporation/NVSMI/nvidia-smi.exe')
+            }
+            if (-not [string]::IsNullOrWhiteSpace(${env:ProgramW6432})) {
+                $nvidiaCandidates += (Join-Path ${env:ProgramW6432} 'NVIDIA Corporation/NVSMI/nvidia-smi.exe')
+            }
+            if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+                $nvidiaCandidates += (Join-Path $env:SystemRoot 'System32/nvidia-smi.exe')
+            }
+            foreach ($candidate in $nvidiaCandidates) {
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    $nvidiaSmiPath = $candidate
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($nvidiaSmiPath)) {
+            try {
+                $rows = @(& $nvidiaSmiPath '--query-gpu=name,memory.total' '--format=csv,noheader,nounits' 2>$null)
+                $normalizedGpu = ($gpuName -replace '[^A-Za-z0-9]', '').ToLowerInvariant()
+                foreach ($row in $rows) {
+                    $match = [regex]::Match([string]$row, '^\s*(.*?),\s*([0-9]+)\s*$')
+                    if (-not $match.Success) { continue }
+                    $reportedName = $match.Groups[1].Value.Trim()
+                    $normalizedReported = ($reportedName -replace '[^A-Za-z0-9]', '').ToLowerInvariant()
+                    if (-not [string]::IsNullOrWhiteSpace($normalizedReported) -and
+                        ($normalizedGpu.Contains($normalizedReported) -or $normalizedReported.Contains($normalizedGpu) -or $rows.Count -eq 1)) {
+                        [UInt64]$memoryMiB = 0
+                        if ([UInt64]::TryParse($match.Groups[2].Value, [ref]$memoryMiB) -and $memoryMiB -gt 0) {
+                            return [UInt64]($memoryMiB * 1MB)
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # Display drivers commonly publish the full 64-bit value here. Match the
+    # registry entry to the WMI adapter by PCI vendor/device ID or driver name.
+    $classRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+    $targetPnp = [regex]::Match([string]$Gpu.PNPDeviceID, '(?i)VEN_[0-9A-F]{4}&DEV_[0-9A-F]{4}').Value
+    $bestBytes = $null
+    $bestScore = 0
+
+    try {
+        foreach ($key in (Get-ChildItem -LiteralPath $classRoot -ErrorAction Stop | Where-Object { $_.PSChildName -match '^\d{4}$' })) {
+            $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+            if ($null -eq $props) { continue }
+
+            $rawMemory = $null
+            $qwProperty = $props.PSObject.Properties['HardwareInformation.qwMemorySize']
+            if ($qwProperty) {
+                $rawMemory = $qwProperty.Value
+            } else {
+                $memoryProperty = $props.PSObject.Properties['HardwareInformation.MemorySize']
+                if ($memoryProperty) { $rawMemory = $memoryProperty.Value }
+            }
+            $memoryBytes = ConvertTo-GpuMemoryBytes -Value $rawMemory
+            if ($null -eq $memoryBytes -or $memoryBytes -le 0) { continue }
+
+            $score = 0
+            if (-not [string]::IsNullOrWhiteSpace($targetPnp)) {
+                $registryIds = @([string]$props.MatchingDeviceId, [string]$props.PNPDeviceID) -join ' '
+                if ($registryIds -match [regex]::Escape($targetPnp)) { $score = 100 }
+            }
+
+            $descriptions = @(
+                [string]$props.DriverDesc,
+                [string]$props.DeviceDesc,
+                [string]$props.'HardwareInformation.AdapterString'
+            ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+            foreach ($description in $descriptions) {
+                if ($description.Trim().Equals($gpuName.Trim(), [StringComparison]::OrdinalIgnoreCase)) {
+                    $score = [Math]::Max($score, 90)
+                } elseif ($description.IndexOf($gpuName, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                          $gpuName.IndexOf($description, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $score = [Math]::Max($score, 70)
+                }
+            }
+
+            if ($score -gt $bestScore) {
+                $bestScore = $score
+                $bestBytes = $memoryBytes
+            }
+        }
+    } catch {}
+
+    if ($bestScore -ge 70 -and $null -ne $bestBytes) {
+        return [UInt64]$bestBytes
+    }
+
+    # WMI is reliable for values below its 32-bit ceiling. Values near 4 GiB
+    # are not trusted because larger adapters are truncated by this property.
+    if ($null -ne $Gpu.AdapterRAM) {
+        [UInt64]$wmiBytes = 0
+        try { $wmiBytes = [UInt64]$Gpu.AdapterRAM } catch { $wmiBytes = 0 }
+        if ($wmiBytes -gt 0 -and $wmiBytes -lt [UInt64]4000000000) {
+            return $wmiBytes
+        }
+    }
+
+    return $null
+}
+
 function Show-SystemInformation {
     Clear-Host
     Write-Host 'SYSTEM INFORMATION' -ForegroundColor Cyan
@@ -1812,7 +2010,12 @@ function Show-SystemInformation {
             foreach ($gpu in $gpus) {
                 Write-Host ("Name:   {0}" -f $gpu.Name) -ForegroundColor Cyan
                 Write-Host ("Driver: {0}" -f $(if ($gpu.DriverVersion) { $gpu.DriverVersion } else { 'Unavailable' }))
-                Write-Host ("VRAM:   {0} GB" -f $(if ($gpu.AdapterRAM) { [Math]::Round(($gpu.AdapterRAM / 1GB), 2) } else { 'N/A' }))
+                $videoMemoryBytes = Get-VideoMemoryBytes -Gpu $gpu
+                if ($null -ne $videoMemoryBytes -and $videoMemoryBytes -gt 0) {
+                    Write-Host ("VRAM:   {0:N2} GB" -f ($videoMemoryBytes / 1GB)) -ForegroundColor Cyan
+                } else {
+                    Write-Host 'VRAM:   Unavailable (Windows did not report a reliable value)' -ForegroundColor DarkGray
+                }
                 Write-Host ''
             }
         } catch {
@@ -1850,6 +2053,105 @@ function Show-SystemInformation {
     Pause-Return
 }
 
+function Save-OfflineWorkflowCopy {
+    Clear-Host
+    Write-Host 'DOWNLOAD OFFLINE WORKFLOW COPY' -ForegroundColor Green
+    Write-Host ('=' * 48) -ForegroundColor DarkCyan
+    Write-Host 'This saves WinToolKit.ps1 in the WORKFLOW folder.' -ForegroundColor Gray
+    Write-Host 'The CMD launcher can use this copy when no internet connection is available.' -ForegroundColor Gray
+    Write-Host 'The WORKFLOW folder is not created or downloaded automatically.' -ForegroundColor Yellow
+    Write-Host ''
+
+    if (Test-Path -LiteralPath $script:OfflineScriptPath -PathType Leaf) {
+        Write-Host 'An offline Workflow copy already exists and will be replaced by the latest release.' -ForegroundColor Yellow
+    }
+
+    $confirm = Read-Host 'Type DOWNLOAD to save the offline copy, or press Enter to cancel'
+    if ($confirm -cne 'DOWNLOAD') {
+        Write-Host 'Offline download cancelled.' -ForegroundColor Yellow
+        Pause-Return
+        return
+    }
+
+    $temporaryFile = $script:OfflineScriptPath + '.' + [Guid]::NewGuid().ToString('N') + '.download'
+    try {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        } catch {}
+
+        $releaseVersion = $null
+        try {
+            $release = Invoke-RestMethod -Uri $script:GitHubLatestReleaseApi `
+                -Headers @{ 'Accept' = 'application/vnd.github+json'; 'User-Agent' = 'WinToolKit' } `
+                -UseBasicParsing -TimeoutSec 25 -ErrorAction Stop
+
+            $releaseTag = [string]$release.tag_name
+            $releaseVersion = ConvertTo-WinToolKitVersion -VersionText $releaseTag
+            if ($null -eq $releaseVersion) {
+                throw "GitHub returned an invalid release tag: $releaseTag"
+            }
+
+            $downloadUrl = 'https://raw.githubusercontent.com/Murdervan/WinToolKit/' + $releaseTag + '/WORKFLOW/WinToolKit.ps1'
+            try {
+                Invoke-WebRequest -Uri $downloadUrl -OutFile $temporaryFile `
+                    -Headers @{ 'User-Agent' = 'WinToolKit' } -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop | Out-Null
+            } catch {
+                $statusCode = 0
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($statusCode -ne 404) { throw }
+                Write-Host 'The script was not found in the release WORKFLOW folder. Trying the main branch...' -ForegroundColor Yellow
+                $releaseVersion = $null
+            }
+        } catch {
+            $statusCode = 0
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($statusCode -ne 404) { throw }
+            Write-Host 'No published release was found. Trying the main branch WORKFLOW file...' -ForegroundColor Yellow
+            $releaseVersion = $null
+        }
+
+        if (-not (Test-Path -LiteralPath $temporaryFile -PathType Leaf)) {
+            $downloadUrl = 'https://raw.githubusercontent.com/Murdervan/WinToolKit/refs/heads/main/WORKFLOW/WinToolKit.ps1'
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $temporaryFile `
+                -Headers @{ 'User-Agent' = 'WinToolKit' } -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop | Out-Null
+        }
+        if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1000) {
+            throw 'The downloaded PowerShell script is missing or too small.'
+        }
+
+        $downloadedText = Get-Content -LiteralPath $temporaryFile -Raw -ErrorAction Stop
+        $versionMatch = [regex]::Match($downloadedText, '(?m)^\s*\$script:ToolVersion\s*=\s*[''"]([^''"]+)[''"]')
+        if (-not $versionMatch.Success) {
+            throw 'The downloaded script does not contain a recognizable ToolVersion.'
+        }
+
+        $downloadedVersion = ConvertTo-WinToolKitVersion -VersionText $versionMatch.Groups[1].Value
+        if ($null -eq $downloadedVersion) {
+            throw 'The downloaded script contains an invalid ToolVersion.'
+        }
+        if ($null -ne $releaseVersion -and $downloadedVersion -ne $releaseVersion) {
+            throw 'The downloaded script version does not match the GitHub release tag.'
+        }
+
+        Move-Item -LiteralPath $temporaryFile -Destination $script:OfflineScriptPath -Force -ErrorAction Stop
+        Write-Log "Saved offline WORKFLOW copy v$downloadedVersion to $script:OfflineScriptPath"
+        Write-Host ''
+        Write-Host "Offline Workflow copy v$downloadedVersion was saved successfully." -ForegroundColor Green
+        Write-Host "Location: $script:OfflineScriptPath" -ForegroundColor Gray
+        Write-Host 'The CMD launcher can now use this copy when GitHub is unavailable.' -ForegroundColor Green
+    } catch {
+        Write-Host ''
+        Write-Host "Could not download the offline Workflow copy: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "OFFLINE WORKFLOW DOWNLOAD FAILED: $($_.Exception.Message)"
+    } finally {
+        if (Test-Path -LiteralPath $temporaryFile) {
+            Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Pause-Return
+}
+
 function Show-About {
     while ($true) {
         Clear-Host
@@ -1863,22 +2165,25 @@ function Show-About {
         Write-Host 'Administrator rights are required for system-wide changes. Review app-removal prompts carefully.'
         Write-Host ''
         Write-Host '[1] Open WinToolKit GitHub Issues'
-        Write-Host '[2] Open README.md'
+        Write-Host '[2] Open README.md online'
+        Write-Host '[3] Download WORKFLOW offline copy'
+        Write-Host '[4] Update WinToolKit'
         Write-Host '[B] Back to main menu' -ForegroundColor Yellow
         Write-Host ''
-        $choice = Read-Host 'Select an option'
+        $choice = (Read-Host 'Select an option').Trim()
         switch ($choice.ToUpperInvariant()) {
             '1' {
                 try { Start-Process $script:IssuesUrl }
                 catch { Write-Host "Could not open browser: $($_.Exception.Message)" -ForegroundColor Yellow; Pause-Return }
             }
             '2' {
-                $readme = Join-Path $script:ToolRoot 'README.md'
-                if (Test-Path -LiteralPath $readme) { Start-Process notepad.exe -ArgumentList @($readme) }
-                else { Write-Host 'README.md was not found.' -ForegroundColor Yellow; Pause-Return }
+                try { Start-Process $script:ReadmeUrl -ErrorAction Stop }
+                catch { Write-Host "Could not open the online README: $($_.Exception.Message)" -ForegroundColor Yellow; Pause-Return }
             }
+            '3' { Save-OfflineWorkflowCopy }
+            '4' { Invoke-WinToolKitUpdate }
             'B' { return }
-            default { Write-Host 'Invalid selection.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+            default { Write-Host 'Invalid selection. Enter 1, 2, 3, 4, or B.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
         }
     }
 }
@@ -2092,6 +2397,10 @@ function Invoke-WinToolKitUpdate {
         $copiedItems = @()
         try {
             foreach ($item in $updatePlan) {
+                $destinationFolder = Split-Path -Parent $item.Destination
+                if (-not (Test-Path -LiteralPath $destinationFolder -PathType Container)) {
+                    New-Item -ItemType Directory -Path $destinationFolder -Force -ErrorAction Stop | Out-Null
+                }
                 Copy-Item -LiteralPath $item.Source -Destination $item.Destination -Force -ErrorAction Stop
                 $copiedItems += $item
             }
@@ -2151,8 +2460,7 @@ function Show-MainMenu {
     Write-Host '[3] Remove Apps (Standard MS Apps)' -ForegroundColor Cyan
     Write-Host '[4] System Info' -ForegroundColor Cyan
     Write-Host '[5] Log Info' -ForegroundColor Cyan
-    Write-Host '[6] Update WinToolKit' -ForegroundColor Cyan
-    Write-Host "[7] About WinToolKit v$script:ToolVersion" -ForegroundColor Cyan
+    Write-Host "[6] About WinToolKit v$script:ToolVersion" -ForegroundColor Cyan
     Write-Host '[Q] Quit' -ForegroundColor Red
     Write-Host '----------------------------------------------' -ForegroundColor DarkCyan
     Write-Host ''
@@ -2182,8 +2490,7 @@ while ($true) {
         '3' { Show-RemovalMenu }
         '4' { Show-SystemInformation }
         '5' { Show-Log }
-        '6' { Invoke-WinToolKitUpdate }
-        '7' { Show-About }
+        '6' { Show-About }
         'Q' {
             Write-Log 'WinToolKit closed by user.'
             Clear-Host
@@ -2191,7 +2498,7 @@ while ($true) {
             Write-Host ''
             break
         }
-        default { Write-Host 'Invalid selection. Please choose 1-7, or Q.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+        default { Write-Host 'Invalid selection. Please choose 1-6, or Q.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
     }
     if ($choice.ToUpperInvariant() -eq 'Q') { break }
 }
