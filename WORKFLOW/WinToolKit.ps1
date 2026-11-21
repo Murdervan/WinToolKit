@@ -2170,20 +2170,37 @@ function Show-About {
         Write-Host '[4] Update WinToolKit'
         Write-Host '[B] Back to main menu' -ForegroundColor Yellow
         Write-Host ''
+
         $choice = (Read-Host 'Select an option').Trim()
+
         switch ($choice.ToUpperInvariant()) {
             '1' {
                 try { Start-Process $script:IssuesUrl }
-                catch { Write-Host "Could not open browser: $($_.Exception.Message)" -ForegroundColor Yellow; Pause-Return }
+                catch {
+                    Write-Host "Could not open browser: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Pause-Return
+                }
             }
             '2' {
                 try { Start-Process $script:ReadmeUrl -ErrorAction Stop }
-                catch { Write-Host "Could not open the online README: $($_.Exception.Message)" -ForegroundColor Yellow; Pause-Return }
+                catch {
+                    Write-Host "Could not open the online README: $($_.Exception.Message)" -ForegroundColor Yellow
+                    Pause-Return
+                }
             }
-            '3' { Save-OfflineWorkflowCopy }
-            '4' { Invoke-WinToolKitUpdate }
-            'B' { return }
-            default { Write-Host 'Invalid selection. Enter 1, 2, 3, 4, or B.' -ForegroundColor Yellow; Start-Sleep -Seconds 1 }
+            '3' {
+                Save-OfflineWorkflowCopy
+            }
+            '4' {
+                Invoke-WinToolKitUpdate
+            }
+            'B' {
+                return
+            }
+            default {
+                Write-Host 'Invalid selection. Enter 1, 2, 3, 4, or B.' -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
         }
     }
 }
