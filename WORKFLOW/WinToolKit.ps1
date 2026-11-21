@@ -2059,7 +2059,7 @@ function Save-OfflineWorkflowCopy {
     Write-Host ('=' * 48) -ForegroundColor DarkCyan
     Write-Host 'This saves WinToolKit.ps1 in the WORKFLOW folder.' -ForegroundColor Gray
     Write-Host 'The CMD launcher can use this copy when no internet connection is available.' -ForegroundColor Gray
-    Write-Host 'The WORKFLOW folder is not created or downloaded automatically.' -ForegroundColor Yellow
+    Write-Host 'The WORKFLOW folder is created only after you confirm the download.' -ForegroundColor Yellow
     Write-Host ''
 
     if (Test-Path -LiteralPath $script:OfflineScriptPath -PathType Leaf) {
@@ -2073,8 +2073,17 @@ function Save-OfflineWorkflowCopy {
         return
     }
 
-    $temporaryFile = $script:OfflineScriptPath + '.' + [Guid]::NewGuid().ToString('N') + '.download'
+    # Create the destination folder only after the user explicitly confirms.
+    $temporaryFile = $null
+
     try {
+        if (-not (Test-Path -LiteralPath $script:WorkflowPath -PathType Container)) {
+            New-Item -ItemType Directory -Path $script:WorkflowPath -Force -ErrorAction Stop | Out-Null
+        }
+
+        # Create the temporary file only after WORKFLOW exists.
+        $temporaryFile = $script:OfflineScriptPath + '.' + [Guid]::NewGuid().ToString('N') + '.download'
+
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         } catch {}
@@ -2115,6 +2124,7 @@ function Save-OfflineWorkflowCopy {
             Invoke-WebRequest -Uri $downloadUrl -OutFile $temporaryFile `
                 -Headers @{ 'User-Agent' = 'WinToolKit' } -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop | Out-Null
         }
+
         if ((Get-Item -LiteralPath $temporaryFile -ErrorAction Stop).Length -lt 1000) {
             throw 'The downloaded PowerShell script is missing or too small.'
         }
@@ -2134,6 +2144,8 @@ function Save-OfflineWorkflowCopy {
         }
 
         Move-Item -LiteralPath $temporaryFile -Destination $script:OfflineScriptPath -Force -ErrorAction Stop
+        $temporaryFile = $null
+
         Write-Log "Saved offline WORKFLOW copy v$downloadedVersion to $script:OfflineScriptPath"
         Write-Host ''
         Write-Host "Offline Workflow copy v$downloadedVersion was saved successfully." -ForegroundColor Green
@@ -2144,13 +2156,14 @@ function Save-OfflineWorkflowCopy {
         Write-Host "Could not download the offline Workflow copy: $($_.Exception.Message)" -ForegroundColor Red
         Write-Log "OFFLINE WORKFLOW DOWNLOAD FAILED: $($_.Exception.Message)"
     } finally {
-        if (Test-Path -LiteralPath $temporaryFile) {
+        if ($temporaryFile -and (Test-Path -LiteralPath $temporaryFile -PathType Leaf)) {
             Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction SilentlyContinue
         }
     }
 
     Pause-Return
 }
+
 
 function Show-About {
     while ($true) {
